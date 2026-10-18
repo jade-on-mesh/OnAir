@@ -41,6 +41,10 @@ public:
     // Custom LoRa setting: only this one is searched while on (freqHz 0 = the tuned frequency; bwHz any, sf 5..12, cr 5..8). The frame
     // is offered to the protocols of the sync word: 0x2B Meshtastic / MeshCom, 0x12 MeshCore / LoRa APRS, 0x34 LoRaWAN, other: all.
     void setCustom(bool on, const MeshLoraSettings& s);
+    // MeshCore with the band plan's presets (custom off): more bandwidths (Hz) to search, each on every regional preset's frequency and SF
+    // besides the preset's own bandwidth (one demodulator more per new frequency / SF / bandwidth inside the capture). Values outside
+    // 1 - 1625 kHz and repeats are dropped; empty (default) = only the presets.
+    void setMeshCoreBandwidths(const std::vector<double>& extraBwHz);
     bool addMeshtasticChannel(const std::string& name, const std::string& base64Psk);   // false: bad key
     bool addMeshCoreChannel(const std::string& name, const std::string& secret);        // hex or base64; false: bad key
     void clearUserChannels();

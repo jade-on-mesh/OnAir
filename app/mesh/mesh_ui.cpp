@@ -19,6 +19,7 @@
 #include <thread>
 #include <map>
 #include <set>
+#include <sstream>
 
 namespace {
 
@@ -47,6 +48,10 @@ struct State {
     std::string mcPreset;
     std::vector<dect2::MeshCorePresetEntry> mcList;
     bool mcFromFile = false, mcListed = false;
+    // MeshCore with the band plan's presets: more bandwidths (Hz) searched on each preset's frequency and SF (prefs "meshCoreExtraBw")
+    std::vector<double> mcExtraBw;
+    std::string pushedMcBw = "-";
+    double mcAddKhz = 125;
     std::atomic<int> mcFetch{0};                 // 0 idle, 1 working, 2 done, 3 failed
     std::thread mcThread;
     char keyName[40] = "", keySecret[96] = "";
@@ -170,6 +175,11 @@ void loadState() {
     S.mtRegion = d.getS("meshMtRegion", "");
     S.mtPreset = d.getS("meshMtPreset", "LongFast");
     S.mcPreset = d.getS("meshCorePreset", "");
+    {
+        std::istringstream bw(d.getS("meshCoreExtraBw", ""));
+        double x;
+        while (bw >> x) if (dect2::meshCoreBandwidthValid(x)) S.mcExtraBw.push_back(x);
+    }
     const std::string s = d.getS("meshKeys", "");
     size_t pos = 0;
     while (pos < s.size()) {
@@ -224,6 +234,46 @@ const double kBws[] = {7812.5, 10416.667, 15625, 20833.333, 31250, 41666.667, 62
 const char* kBwNames[] = {"7.8 kHz", "10.4 kHz", "15.6 kHz", "20.8 kHz", "31.25 kHz", "41.7 kHz", "62.5 kHz", "125 kHz", "250 kHz", "500 kHz",
                           "812.5 kHz (2.4 GHz)", "1625 kHz (2.4 GHz)"};
 constexpr int kNumBws = (int)(sizeof(kBws) / sizeof(kBws[0]));
+constexpr int kNumSubGhzBws = 10;   // 7.8 - 500 kHz: the ones a MeshCore radio (SX126x / SX127x) can use
+
+// "62.5 kHz" for a listed bandwidth, else "203.125 kHz"
+std::string bwLabel(double bwHz) {
+    for (int i = 0; i < kNumBws; i++) if (std::fabs(kBws[i] - bwHz) < 1) return kBwNames[i];
+    char b[32];
+    snprintf(b, sizeof b, "%g kHz", bwHz / 1e3);
+    return b;
+}
+
+// a bandwidth picker: the listed values plus a box for any value in kHz (1 - 1625). True when bwHz changed.
+bool bandwidthPicker(const char* id, double& bwHz, int listed = kNumBws) {
+    bool ch = false;
+    int bi = -1;
+    for (int i = 0; i < listed; i++) if (std::fabs(kBws[i] - bwHz) < 1) bi = i;
+    ImGui::PushID(id);
+    ImGui::SetNextItemWidth(150 * gUi);
+    const std::string prev = bi >= 0 ? std::string(kBwNames[bi]) : bwLabel(bwHz) + " (other)";
+    if (ImGui::BeginCombo("##bwl", prev.c_str())) {
+        for (int i = 0; i < listed; i++) if (ImGui::Selectable(kBwNames[i], i == bi)) { bwHz = kBws[i]; ch = true; }
+        ImGui::EndCombo();
+    }
+    ImGui::SameLine(0, 6 * gUi);
+    double khz = bwHz / 1e3;
+    ImGui::SetNextItemWidth(90 * gUi);
+    if (ImGui::InputDouble("kHz##bwk", &khz, 0, 0, "%.4g", ImGuiInputTextFlags_EnterReturnsTrue)) {
+        const double hz = std::max(dect2::kMeshCoreMinBwHz, std::min(dect2::kMeshCoreMaxBwHz, khz * 1e3));
+        if (std::fabs(hz - bwHz) >= 1) { bwHz = hz; ch = true; }
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Any bandwidth from 1 to 1625 kHz (press Enter). SX126x / SX127x radios, and so MeshCore nodes, use only the\nlisted 7.8 - 500 kHz steps; other values meet only a radio or SDR set to exactly the same.");
+    ImGui::PopID();
+    return ch;
+}
+
+void saveMcExtraBw() {
+    std::ostringstream o;
+    o.precision(10);
+    for (double x : S.mcExtraBw) o << (o.tellp() > 0 ? " " : "") << x;
+    plat::prefs().setS("meshCoreExtraBw", o.str());
+}
 
 State::Custom& customOf(const App& a) {
     const int m = subMask(a);
@@ -319,6 +369,11 @@ void tick(App& a) {
     if (!S.keysPushed) { pushKeys(a); S.keysPushed = true; }
     if (S.pushedRegion != effRegion(a)) { S.pushedRegion = effRegion(a); r.setRegion(kPlans[S.pushedRegion].rxRegion); }
     if (S.pushedProtocols != effProtocols(a)) { S.pushedProtocols = effProtocols(a); r.setProtocols(S.pushedProtocols); }   // a protocol entry: only its own network
+    {
+        std::ostringstream o;
+        for (double x : S.mcExtraBw) o << x << ' ';
+        if (o.str() != S.pushedMcBw) { r.setMeshCoreBandwidths(S.mcExtraBw); S.pushedMcBw = o.str(); }
+    }
     if (S.pushedPresets != (int)S.allPresets) { r.setPresetSearch(S.allPresets); S.pushedPresets = (int)S.allPresets; }
     if (S.pushedTuned != a.freqMhz) { r.setTunedHz(a.freqMhz * 1e6); S.pushedTuned = a.freqMhz; }   // the engine does not pass the user's frequency
     if (!a.engine.running()) { S.lastSeq = 0; S.logPrimed = false; return; }
@@ -1022,6 +1077,50 @@ void chatView(const App& a) {
 // ---------------------------------------------------------------- settings
 
 
+// MeshCore, band plan presets: the bandwidths searched besides each preset's own (any number; each adds demodulators)
+void mcSearchBandwidths(App&) {
+    ImGui::TextDisabled("MeshCore: also search bandwidths");
+    bool ch = false;
+    for (int i = 0; i < kNumSubGhzBws; i++) {
+        bool on = std::any_of(S.mcExtraBw.begin(), S.mcExtraBw.end(), [&](double x) { return std::fabs(x - kBws[i]) < 1; });
+        if (i % 5) ImGui::SameLine(0, 8 * gUi);
+        if (ImGui::Checkbox(kBwNames[i], &on)) {
+            if (on) S.mcExtraBw.push_back(kBws[i]);
+            else S.mcExtraBw.erase(std::remove_if(S.mcExtraBw.begin(), S.mcExtraBw.end(), [&](double x) { return std::fabs(x - kBws[i]) < 1; }), S.mcExtraBw.end());
+            ch = true;
+        }
+    }
+    // values off the list (typed in)
+    for (size_t i = 0; i < S.mcExtraBw.size(); i++) {
+        const double x = S.mcExtraBw[i];
+        bool listed = false;
+        for (int k = 0; k < kNumSubGhzBws; k++) listed |= std::fabs(kBws[k] - x) < 1;
+        if (listed) continue;
+        ImGui::PushID((int)i);
+        const std::string lab = bwLabel(x) + "  x";
+        if (ImGui::SmallButton(lab.c_str())) { S.mcExtraBw.erase(S.mcExtraBw.begin() + (long)i); ch = true; ImGui::PopID(); break; }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Click to stop searching this bandwidth.");
+        ImGui::PopID();
+        ImGui::SameLine(0, 6 * gUi);
+    }
+    ImGui::SetNextItemWidth(90 * gUi);
+    ImGui::InputDouble("##mcaddbw", &S.mcAddKhz, 0, 0, "%.4g");
+    ImGui::SameLine(0, 6 * gUi);
+    if (ImGui::SmallButton("Add kHz")) {
+        const double hz = S.mcAddKhz * 1e3;
+        if (dect2::meshCoreBandwidthValid(hz) && std::none_of(S.mcExtraBw.begin(), S.mcExtraBw.end(), [&](double x) { return std::fabs(x - hz) < 1; })) {
+            S.mcExtraBw.push_back(hz); ch = true;
+        }
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Search another bandwidth (1 - 1625 kHz) on every MeshCore preset's frequency and spreading factor.");
+    if (ch) saveMcExtraBw();
+    if (!S.mcExtraBw.empty())
+        ImGui::TextDisabled("Each regional preset's frequency and SF is also searched at %zu more bandwidth%s (more CPU; see the decoder list).",
+                            S.mcExtraBw.size(), S.mcExtraBw.size() == 1 ? "" : "s");
+    else ImGui::TextDisabled("Only the presets' own bandwidths are searched.");
+    ImGui::Spacing();
+}
+
 // the LoRa setting: the band plan's presets (with the Meshtastic region and modem preset) or a custom one, remembered per entry
 void loraSettings(App& a) {
     State::Custom& c = customOf(a);
@@ -1049,7 +1148,15 @@ void loraSettings(App& a) {
             ImGui::EndCombo();
         }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("The radio settings the MeshCore app suggests for each region (frequency, bandwidth, spreading factor, coding rate). A preset fills in the\ncustom LoRa setting and tunes to its frequency. Custom keeps the values you enter below. %s", S.mcFromFile ? "The list is the one you refreshed from meshcore.nz." : "The list is the one built into this version.");
-        if (cur) ImGui::TextDisabled("%s", dect2::meshCorePresetSummary(*cur).c_str());
+        if (cur) {
+            ImGui::TextDisabled("%s", dect2::meshCorePresetSummary(*cur).c_str());
+            if (c.on && std::fabs(c.bwHz - cur->bwKhz * 1e3) >= 1) {   // the preset with its bandwidth changed below
+                ImGui::TextColored(ImVec4(0.96f, 0.68f, 0.34f, 1), "bandwidth changed to %s", bwLabel(c.bwHz).c_str());
+                ImGui::SameLine(0, 8 * gUi);
+                if (ImGui::SmallButton("Preset's bandwidth")) { mcApply(a, *cur); if (a.engine.running()) startReceiver(a); }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Back to %g kHz, the bandwidth of %s.", cur->bwKhz, cur->title.c_str());
+            }
+        }
         ImGui::BeginDisabled(S.mcFetch == 1);
         if (ImGui::SmallButton("Refresh from meshcore.nz")) mcRefresh();
         ImGui::EndDisabled();
@@ -1073,6 +1180,7 @@ void loraSettings(App& a) {
     }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Custom: one LoRa setting of your own (bandwidth, spreading factor, coding rate, sync word, preamble) on the\nfrequency below, for networks that do not use the usual presets. Only that setting is searched. Kept for each mode entry.");
     if (!c.on) {
+        if (subMask(a) == 0 || subMask(a) == 2) mcSearchBandwidths(a);
         if (!meshtasticShown(a)) return;
         // Meshtastic: any firmware region and modem preset; the frequency box goes to the preset's slot
         const auto regions = dect2::meshtasticRegions();
@@ -1112,12 +1220,13 @@ void loraSettings(App& a) {
         a.freqMhz = mhz; retune = true;
     }
     if (S.customEntry == subMask(a) && std::fabs(c.mhz - a.freqMhz) > 1e-7) { c.mhz = a.freqMhz; ch = true; }   // the frequency box is the custom frequency
-    int bi = 7;
-    for (int i = 0; i < kNumBws; i++) if (std::fabs(kBws[i] - c.bwHz) < 1) bi = i;
-    ImGui::SetNextItemWidth(220 * gUi);
-    if (ImGui::Combo("Bandwidth##mcb", &bi, kBwNames, kNumBws)) {
-        const bool rateChange = (kBws[bi] > 500e3) != (c.bwHz > 500e3);
-        c.bwHz = kBws[bi]; ch = true; retune |= rateChange;
+    bool bwChanged = false;
+    {
+        const double was = c.bwHz;
+        if (bandwidthPicker("mcb", c.bwHz)) { bwChanged = true; retune |= (c.bwHz > 500e3) != (was > 500e3); }
+        ImGui::SameLine(0, 6 * gUi); ImGui::TextUnformatted("Bandwidth");
+        if (subMask(a) == 2 && !S.mcPreset.empty() && ImGui::IsItemHovered())
+            ImGui::SetTooltip("Changing only the bandwidth keeps the MeshCore preset chosen above (shown as changed).");
     }
     ImGui::SetNextItemWidth(220 * gUi);
     if (ImGui::SliderInt("Spreading factor##mcs", &c.sf, 5, 12, "SF%d")) { c.sf = std::max(5, std::min(12, c.sf)); ch = true; }
@@ -1141,6 +1250,8 @@ void loraSettings(App& a) {
     if (ImGui::InputInt("Preamble (symbols)##mcp", &c.preamble, 1, 4)) { c.preamble = std::max(6, std::min(65535, c.preamble)); ch = true; }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Meshtastic 16, MeshCore 32 (SF8 and below) or 16, LoRa APRS and LoRaWAN 8.");
     ImGui::TextDisabled("Low data rate optimisation: %s (on when a symbol lasts 16 ms or more)", dect2::meshLoraLdro(c.sf, c.bwHz) ? "on" : "off");
+    // a bandwidth change alone keeps the MeshCore preset (its bandwidth overridden); any other change makes the setting custom
+    if (bwChanged && !ch) saveCustom(a);
     if (ch) { saveCustom(a); if (!S.mcPreset.empty()) { S.mcPreset.clear(); plat::prefs().setS("meshCorePreset", ""); } }
     if (retune && a.engine.running()) startReceiver(a);
 }
@@ -1496,6 +1607,20 @@ void synth(App& a, bool& changed) {
     float cfo = (float)(sc.cfoHz / 1e3);
     if (ImGui::SliderFloat("##mcfo", &cfo, -25, 25, "%.1f kHz")) { sc.cfoHz = cfo * 1e3; changed = true; }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("The radio's frequency error at 869 MHz (a 1 ppm TCXO is off by about 0.9 kHz).");
+    // the MeshCore network's bandwidth (868 / 915 scenes with MeshCore in them)
+    const bool lwScene = sc.modeOpt[1] == 3 || sc.modeOpt[1] == 4;
+    if (!p70 && !lwScene && (subMask(a) == 2 || (!subMask(a) && (sel & 2)))) {
+        flowNext(); ImGui::TextDisabled("MeshCore BW"); ImGui::SameLine();
+        const std::string prev = sc.modeVal[1] > 0 ? bwLabel(sc.modeVal[1]) : std::string("region's");
+        ImGui::SetNextItemWidth(110 * gUi);
+        if (ImGui::BeginCombo("##msbw", prev.c_str())) {
+            if (ImGui::Selectable("region's", sc.modeVal[1] <= 0)) { sc.modeVal[1] = 0; changed = true; }
+            for (int i = 0; i < kNumSubGhzBws; i++)
+                if (ImGui::Selectable(kBwNames[i], std::fabs(sc.modeVal[1] - kBws[i]) < 1)) { sc.modeVal[1] = kBws[i]; changed = true; }
+            ImGui::EndCombo();
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Bandwidth of the simulated MeshCore nodes (region's: 62.5 kHz EU / US, 250 kHz ANZ). Frequency, SF and\ncoding rate stay the region's. To hear it with the presets, tick the same bandwidth under 'also search bandwidths'.");
+    }
     if (subMask(a)) return;   // the band follows the entry
     flowNext();
     bool us = sc.modeOpt[1] == 1;

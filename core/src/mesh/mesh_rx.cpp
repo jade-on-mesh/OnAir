@@ -71,7 +71,8 @@ const char* mcRegionOf(int region) { return region == 1 ? "US" : region == 2 ? "
 // api.meshcore.nz preset regions (Europe, North America, Oceania, …)
 const char* meshCorePlanRegion(int region) { return region == 1 ? "North America" : region >= 2 ? "Oceania" : "Europe"; }
 
-std::vector<PlanEntry> regionPlan(int region, int protocols, bool allPresets, const std::string& mtRegion, const std::string& mtPreset) {
+std::vector<PlanEntry> regionPlan(int region, int protocols, bool allPresets, const std::string& mtRegion, const std::string& mtPreset,
+                                  const std::vector<double>& mcExtraBw) {
     std::vector<PlanEntry> v;
     if (protocols & 1) {
         const std::string reg = !mtRegion.empty() ? mtRegion : mtRegionOf(region);
@@ -90,17 +91,19 @@ std::vector<PlanEntry> regionPlan(int region, int protocols, bool allPresets, co
     if (protocols & 2) {
         // One LoRa demod per (freq, SF, BW): the coding rate comes from each frame's header. EU networks often use SF7 4/5
         // or SF8 4/8 on 869.618 MHz — listening only to the default SF8 preset yields CRC errors on SF7 traffic.
+        // mcExtraBw: the bandwidths the user added, each searched on every preset's frequency and SF as well.
         const char* mcReg = meshCorePlanRegion(region);
-        bool anyMc = false;
-        for (const auto& pe : meshCoreBuiltinPresets()) {
-            if (pe.region != mcReg) continue;
-            addEntry(v, 2, meshCorePresetToLora(pe));
-            anyMc = true;
-        }
-        if (!anyMc) {
+        std::vector<MeshCorePresetEntry> mcPre;
+        for (const auto& pe : meshCoreBuiltinPresets()) if (pe.region == mcReg) mcPre.push_back(pe);
+        if (mcPre.empty()) {
             const MeshLoraSettings s = meshcoreDefaults(mcRegionOf(region));
-            if (s.freqHz > 0) addEntry(v, 2, s);
+            if (s.freqHz > 0) {
+                MeshCorePresetEntry e;
+                e.title = s.name; e.mhz = s.freqHz / 1e6; e.bwKhz = s.bwHz / 1e3; e.sf = s.sf; e.cr = s.cr;
+                mcPre.push_back(e);
+            }
         }
+        for (const auto& s : meshCoreSearchSettings(mcPre, mcExtraBw)) addEntry(v, 2, s);
     }
     // LoRa APRS and MeshCom: every known frequency (only those inside the captured band get a demodulator)
     if (protocols & 4) for (const auto& s : loraAprsPresets()) addEntry(v, 3, s);
@@ -126,6 +129,7 @@ struct MeshReceiver::Impl {
     int region = 0, protocols = 15;
     bool presetSearch = false;
     std::string mtRegion, mtPreset;
+    std::vector<double> mcExtraBw;          // MeshCore: bandwidths searched on top of the presets' own (setMeshCoreBandwidths)
     bool customOn = false;
     MeshLoraSettings custom;
     std::atomic<bool> dirty{true};
@@ -174,11 +178,11 @@ struct MeshReceiver::Impl {
     double now() const { return curRate > 0 ? (double)nProc / curRate : 0; }
 
     void rebuild() {
-        double rt, off, tu; int reg, prot; bool all, cu; std::string mreg, mpre; MeshLoraSettings cs;
+        double rt, off, tu; int reg, prot; bool all, cu; std::string mreg, mpre; MeshLoraSettings cs; std::vector<double> mcbw;
         {
             std::lock_guard<std::mutex> lk(mu);
             rt = rate; off = offsetHz; tu = tunedHz; reg = region; prot = protocols; all = presetSearch;
-            mreg = mtRegion; mpre = mtPreset; cu = customOn; cs = custom;
+            mreg = mtRegion; mpre = mtPreset; cu = customOn; cs = custom; mcbw = mcExtraBw;
             dirty = false;
         }
         curRate = rt; curOffset = off; curTuned = tu;
@@ -187,7 +191,7 @@ struct MeshReceiver::Impl {
         tel.inputRate = rt; tel.tunedHz = tu; tel.region = reg; tel.protocols = prot; tel.presetSearch = all;
         tel.mtRegion = !mreg.empty() ? mreg : mtRegionOf(reg); tel.custom = cu;
         if (rt <= 0) return;
-        const auto plan = cu ? customPlan(cs, tu, prot) : regionPlan(reg, prot, all, mreg, mpre);
+        const auto plan = cu ? customPlan(cs, tu, prot) : regionPlan(reg, prot, all, mreg, mpre, mcbw);
         std::string inBand;
         for (const auto& e : plan) {
             MeshDecoderInfo d;
@@ -697,6 +701,14 @@ void MeshReceiver::setPresetSearch(bool all) { std::lock_guard<std::mutex> lk(p_
 void MeshReceiver::setMeshtasticPlan(const std::string& region, const std::string& preset) {
     std::lock_guard<std::mutex> lk(p_->mu);
     p_->mtRegion = region; p_->mtPreset = preset; p_->dirty = true;
+}
+void MeshReceiver::setMeshCoreBandwidths(const std::vector<double>& extraBwHz) {
+    std::vector<double> v;
+    for (double bw : extraBwHz)
+        if (meshCoreBandwidthValid(bw) && std::none_of(v.begin(), v.end(), [&](double x) { return std::fabs(x - bw) < 1; })) v.push_back(bw);
+    std::lock_guard<std::mutex> lk(p_->mu);
+    if (v == p_->mcExtraBw) return;
+    p_->mcExtraBw = std::move(v); p_->dirty = true;
 }
 void MeshReceiver::setCustom(bool on, const MeshLoraSettings& s) {
     std::lock_guard<std::mutex> lk(p_->mu);

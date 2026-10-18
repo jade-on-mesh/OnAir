@@ -2,6 +2,7 @@
 #include "dect2/mesh_presets.h"
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -152,6 +153,35 @@ std::vector<std::string> meshCoreRegions(const std::vector<MeshCorePresetEntry>&
     std::vector<std::string> r;
     for (const auto& e : v) if (std::find(r.begin(), r.end(), e.region) == r.end()) r.push_back(e.region);
     return r;
+}
+
+bool meshCoreBandwidthValid(double bwHz) { return std::isfinite(bwHz) && bwHz >= kMeshCoreMinBwHz && bwHz <= kMeshCoreMaxBwHz; }
+
+MeshCorePresetEntry meshCorePresetWithBandwidth(const MeshCorePresetEntry& p, double bwHz) {
+    MeshCorePresetEntry e = p;
+    if (meshCoreBandwidthValid(bwHz)) e.bwKhz = bwHz / 1e3;
+    return e;
+}
+
+std::vector<MeshLoraSettings> meshCoreSearchSettings(const std::vector<MeshCorePresetEntry>& presets, const std::vector<double>& extraBwHz) {
+    std::vector<MeshLoraSettings> v;
+    auto add = [&](const MeshLoraSettings& s) {
+        for (const auto& x : v)
+            if (std::fabs(x.freqHz - s.freqHz) < 1 && x.sf == s.sf && std::fabs(x.bwHz - s.bwHz) < 1) return;
+        v.push_back(s);
+    };
+    for (const auto& p : presets) add(meshCorePresetToLora(p));
+    for (double bw : extraBwHz) {
+        if (!meshCoreBandwidthValid(bw)) continue;
+        for (const auto& p : presets) {
+            MeshLoraSettings s = meshCorePresetToLora(meshCorePresetWithBandwidth(p, bw));
+            char b[32];
+            snprintf(b, sizeof b, " @ %g kHz", bw / 1e3);
+            s.name = p.title + b;
+            add(s);
+        }
+    }
+    return v;
 }
 
 } // namespace dect2

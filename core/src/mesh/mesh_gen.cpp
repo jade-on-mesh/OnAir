@@ -2,6 +2,7 @@
 #include "dect2/mesh_gen.h"
 #include "dect2/gen_util.h"
 #include "dect2/mesh_lora.h"
+#include "dect2/mesh_presets.h"
 #include "dect2/mesh_proto.h"
 #include "dect2/mesh_rx.h"
 #include <algorithm>
@@ -145,7 +146,11 @@ public:
             mt_.offsetHz = -tuneOffset;
             mt_.bwHz = s.bwHz;
         }
-        const MeshLoraSettings c = meshcoreDefaults(region_ == 1 ? "US" : anz ? "AU" : "EU");
+        MeshLoraSettings c = meshcoreDefaults(region_ == 1 ? "US" : anz ? "AU" : "EU");
+        if (meshCoreBandwidthValid(cfg.modeVal[1])) {   // modeVal[1]: the MeshCore network's bandwidth instead of the region's
+            c.bwHz = cfg.modeVal[1];
+            c.ldro = meshLoraLdro(c.sf, c.bwHz);
+        }
         if ((prot & 2) && c.freqHz > 0 && lf > 0) {
             const double off = cfg.modeOpt[4] == 1 ? -tuneOffset : c.freqHz - lf - tuneOffset;   // modeOpt[4] 1: tuned to MeshCore itself
             if (std::fabs(off) + c.bwHz < 0.45 * rate) {
