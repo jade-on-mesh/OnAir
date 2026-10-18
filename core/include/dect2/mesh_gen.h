@@ -26,6 +26,8 @@
 //   modeOpt[3]  1: start with a quiet second (default: the first frame starts after 0.2 s); 2 (70 cm scene): no SNR variation
 //   modeOpt[4]  1: the scene is placed for a receiver tuned to MeshCore (868 / 915) or to LoRa APRS EU 433.775 MHz (70 cm) instead
 //   modeVal[0]  SNR of the weakest node in dB (0 = snrDb - 20); the others are spread evenly between it and snrDb
+//   modeVal[1]  bandwidth of the MeshCore network in Hz (868 / 915 scenes; 0 or outside 1 - 1625 kHz = the region's: 62.5 kHz EU / US,
+//               250 kHz ANZ); frequency, SF, CR and preamble stay the region's, LDRO follows the bandwidth
 #pragma once
 #include "mode_synth.h"
 #include <memory>

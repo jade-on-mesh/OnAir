@@ -42,4 +42,15 @@ bool loadMeshCorePresetFile(const std::string& path, std::vector<MeshCorePresetE
 std::vector<MeshCorePresetEntry> meshCorePresets(const std::string& savedFile, bool* fromFile = nullptr);
 std::vector<std::string> meshCoreRegions(const std::vector<MeshCorePresetEntry>& v);
 
+// The bandwidths (Hz) a MeshCore setting may use here: 1 kHz to 1625 kHz (the standard SX126x / SX127x steps are 7.8 - 500 kHz, the
+// SX128x 2.4 GHz ones 203.125 - 1625 kHz; other values only meet radios or SDRs set to exactly the same).
+constexpr double kMeshCoreMinBwHz = 1e3, kMeshCoreMaxBwHz = 1625e3;
+bool meshCoreBandwidthValid(double bwHz);
+// A preset at another bandwidth: the same frequency, SF and CR, its title kept; preamble and LDRO follow the new bandwidth as
+// meshCorePresetToLora decides them. bwHz outside the valid range leaves the preset's own.
+MeshCorePresetEntry meshCorePresetWithBandwidth(const MeshCorePresetEntry& p, double bwHz);
+// The LoRa settings to search for a set of presets: each preset as it is, then each one's frequency and SF again at every extra bandwidth
+// (named "<title> @ <bw> kHz"). Settings already in the list (same frequency, SF and bandwidth) are not repeated; invalid bandwidths are skipped.
+std::vector<MeshLoraSettings> meshCoreSearchSettings(const std::vector<MeshCorePresetEntry>& presets, const std::vector<double>& extraBwHz);
+
 } // namespace dect2
