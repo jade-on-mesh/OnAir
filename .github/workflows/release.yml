@@ -65,13 +65,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install cross toolchain
-        run: brew install cmake pkg-config nasm mingw-w64
+        run: brew install cmake pkg-config nasm mingw-w64 zstd xz
       - name: Cache Windows cross prefix
         id: winpfx
         uses: actions/cache@v4
         with:
           path: onair-win-prefix
-          key: onair-win-prefix-${{ hashFiles('tools/package/cross_deps_windows.sh', 'packaging/windows/mingw-toolchain.cmake') }}
+          key: onair-win-prefix-${{ hashFiles('tools/package/cross_deps_windows.sh', 'packaging/windows/mingw-toolchain.cmake', 'tools/package/fetch_windows_deps.sh', 'tools/package/msys2_fetch.py') }}
+      # A clone without the vendor folder (a fork, a fresh checkout) fetches the pinned sources and MSYS2 packages first; a folder that is
+      # already there is used as it is.
+      - name: Fetch Windows dependency sources
+        if: steps.winpfx.outputs.cache-hit != 'true' && hashFiles('build-windows-deps/src/**') == ''
+        run: tools/package/fetch_windows_deps.sh
       - name: Build Windows dependencies
         if: steps.winpfx.outputs.cache-hit != 'true'
         env:
