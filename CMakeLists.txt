@@ -1,9 +1,9 @@
 cmake_minimum_required(VERSION 3.20)
 if(APPLE)
-  project(OnAir VERSION 0.2.6 LANGUAGES C CXX OBJCXX)
+  project(OnAir VERSION 0.2.7 LANGUAGES C CXX OBJCXX)
   set(CMAKE_OBJCXX_STANDARD 20)
 else()
-  project(OnAir VERSION 0.2.6 LANGUAGES C CXX)
+  project(OnAir VERSION 0.2.7 LANGUAGES C CXX)
 endif()
 
 # A compiler cache, when one is installed, makes repeat builds take seconds (-DDECT2_CCACHE=OFF turns it off).
