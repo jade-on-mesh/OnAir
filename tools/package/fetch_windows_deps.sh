@@ -6,6 +6,7 @@
 #     cross_deps_windows.sh unpacks (GitHub's own source archives are git archive output too; submodules are not included in either);
 #   - MSYS2 UCRT64 packages (UHD, the GCC runtime, libusb and what they depend on): resolved from MSYS2's package database by
 #     msys2_fetch.py, each one checked against the SHA-256 the database lists.
+# MSYS2 package names are the ones of msys2/MINGW-packages (UHD is "libuhd", not "uhd").
 # Needs: curl, git, gzip, xz, zstd, python3, and shasum or sha256sum. Files already present with the right checksum are kept.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -69,4 +70,4 @@ source_tree airspyhf-1.6.8.tar.gz        airspyhf-1.6.8            airspy/airspy
 
 echo "=== MSYS2 UCRT64 packages -> $SRC/msys2"
 python3 "$ROOT/tools/package/msys2_fetch.py" "$SRC/msys2" \
-    mingw-w64-ucrt-x86_64-uhd mingw-w64-ucrt-x86_64-gcc-libs mingw-w64-ucrt-x86_64-libwinpthread mingw-w64-ucrt-x86_64-libusb
+    mingw-w64-ucrt-x86_64-libuhd mingw-w64-ucrt-x86_64-gcc-libs mingw-w64-ucrt-x86_64-libwinpthread mingw-w64-ucrt-x86_64-libusb

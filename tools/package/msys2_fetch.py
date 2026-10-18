@@ -84,7 +84,11 @@ def main():
         dep = todo.pop(0)
         n = find(dep)
         if n is None:
-            raise SystemExit(f"error: {dep} is not in the MSYS2 UCRT64 repository")
+            pre = "mingw-w64-ucrt-x86_64-"
+            core = bare(dep).replace(pre, "")
+            near = sorted(k for k in pkgs if core in k.replace(pre, "") or (len(k) - len(pre) >= 3 and k.replace(pre, "") in core))[:8]
+            raise SystemExit(f"error: {dep} is not in the MSYS2 UCRT64 repository ({len(pkgs)} packages read)"
+                             + (f"; similar names: {', '.join(near)}" if near else ""))
         if n in want:
             continue
         want.append(n)
