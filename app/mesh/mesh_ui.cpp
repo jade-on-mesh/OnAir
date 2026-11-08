@@ -361,6 +361,8 @@ void mcApply(App& a, const dect2::MeshCorePresetEntry& p) {
 
 } // namespace
 
+constexpr double kRadio2MaxRateHz = 20e6;   // radio2 raises the rate up to this (a HackRF's top), never further
+
 double meshSampleRate(App& a) {
     double bw = 0;
     if (customActive(a)) bw = customOf(a).bwHz;
@@ -370,8 +372,10 @@ double meshSampleRate(App& a) {
     }
     double rate = bw > 500e3 ? 4e6 : 2e6;
     loadState();
-    if (radio2Active(a))   // wide enough that radio2's channel lies inside the capture too (the radio stays centred on the first frequency)
-        rate = std::max(rate, dect2::meshRadio2RateHz(radioCenterMhz(a) * 1e6, S.r2.mhz * 1e6, S.r2.bwHz));
+    if (radio2Active(a)) {   // wide enough that radio2's channel lies inside the capture too (the radio stays centred on the first frequency)
+        const double r2 = dect2::meshRadio2RateHz(radioCenterMhz(a) * 1e6, S.r2.mhz * 1e6, S.r2.bwHz);
+        if (r2 <= kRadio2MaxRateHz) rate = std::max(rate, r2);   // further apart: radio2 stays outside the capture (the settings say so)
+    }
     return rate;
 }
 
@@ -1369,6 +1373,7 @@ void radio2Settings(App& a) {
     if (!S.r2.on) return;
     // where it stands: inside the capture or not, and what it has heard
     const double need = meshSampleRate(a);
+    const double r2need = dect2::meshRadio2RateHz(radioCenterMhz(a) * 1e6, S.r2.mhz * 1e6, S.r2.bwHz);
     const bool run = a.engine.running();
     const double have = run ? a.engine.radioRate() : a.tune.sampleRate;
     const dect2::MeshDecoderInfo* dec = nullptr;
@@ -1380,7 +1385,11 @@ void radio2Settings(App& a) {
                             (unsigned long long)dec->frames, (unsigned long long)dec->crcBad, dec->frames ? (", last SNR " + std::to_string((int)std::lround(dec->lastSnrDb)) + " dB").c_str() : "");
     else if (dec && dec->preset != "radio2")
         ImGui::TextDisabled("radio2 is the same channel and setting as \"%s\": no second demodulator is needed.", dec->preset.c_str());
-    if (have + 1 < need) {
+    if (r2need > kRadio2MaxRateHz + 1) {
+        ImGui::TextColored(pal::warnAmber(), "radio2 lies %.3f MHz from the first frequency: both would need %.0f Msps in one capture, more than OnAir opens a radio at "
+                           "for radio2 (%.0f Msps). Pick a radio2 frequency within about %.0f MHz of the first one.", std::fabs(offMhz), r2need / 1e6,
+                           kRadio2MaxRateHz / 1e6, 0.45 * kRadio2MaxRateHz / 1e6 - 0.4);
+    } else if (have + 1 < need) {
         const RateLimits lim = rateLimitsOf(a.devices[a.devIdx]);
         ImGui::TextColored(pal::warnAmber(), "radio2 lies %.3f MHz from the first frequency: it needs %.1f Msps or more, the radio %s %.1f Msps.", std::fabs(offMhz),
                            need / 1e6, run ? "runs at" : "is set to", have / 1e6);
