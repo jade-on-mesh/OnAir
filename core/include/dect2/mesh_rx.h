@@ -45,6 +45,10 @@ public:
     // besides the preset's own bandwidth (one demodulator more per new frequency / SF / bandwidth inside the capture). Values outside
     // 1 - 1625 kHz and repeats are dropped; empty (default) = only the presets.
     void setMeshCoreBandwidths(const std::vector<double>& extraBwHz);
+    // radio2: a second MeshCore channel decoded beside everything else (the band plan's presets or the custom setting), at its own frequency
+    // s.freqHz (absolute; it has to lie inside the captured band, see meshRadio2RateHz). Its decoder and its packets are named "radio2".
+    // Searched while MeshCore is among the protocols (setProtocols). sf 5..12, cr 5..8; LDRO follows sf and bandwidth.
+    void setRadio2(bool on, const MeshLoraSettings& s);
     bool addMeshtasticChannel(const std::string& name, const std::string& base64Psk);   // false: bad key
     bool addMeshCoreChannel(const std::string& name, const std::string& secret);        // hex or base64; false: bad key
     void clearUserChannels();
@@ -55,5 +59,8 @@ private:
 };
 
 ModeTuning meshTuning();
+// The sample rate (Hz) at which a channel at chanHz, bwHz wide, lies inside the band the receiver searches when the radio is centred on
+// centreHz (the receiver's own margin: |offset| + bw / 2 + 25 kHz < 0.45 x rate). 0 for a channel without a width.
+double meshRadio2RateHz(double centreHz, double chanHz, double bwHz);
 
 } // namespace dect2

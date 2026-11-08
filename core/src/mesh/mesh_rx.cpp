@@ -63,6 +63,23 @@ std::vector<PlanEntry> customPlan(const MeshLoraSettings& s, double tunedHz, int
     return {e};
 }
 
+// radio2: one more MeshCore channel (its own frequency) beside whatever else is searched, named "radio2" in the decoder list and on its packets.
+// The same setting already in the plan is not searched twice: that entry is renamed "<name> + radio2".
+void addRadio2(std::vector<PlanEntry>& v, const MeshLoraSettings& s) {
+    if (s.freqHz <= 0 || !(s.bwHz > 0)) return;
+    for (auto& e : v)
+        if (std::fabs(e.freqHz - s.freqHz) < 1 && e.p.sf == s.sf && std::fabs(e.p.bwHz - s.bwHz) < 1 && e.p.syncWord == s.syncWord) {
+            if (e.protocol != 2 && std::find(e.also.begin(), e.also.end(), 2) == e.also.end()) e.also.push_back(2);
+            e.preset += " + radio2";
+            return;
+        }
+    PlanEntry e;
+    e.protocol = 2; e.preset = "radio2"; e.freqHz = s.freqHz;
+    e.p.sf = std::max(5, std::min(12, s.sf)); e.p.bwHz = s.bwHz; e.p.cr = std::max(5, std::min(8, s.cr));
+    e.p.preamble = std::max(6, s.preamble); e.p.syncWord = s.syncWord; e.p.ldro = meshLoraLdro(e.p.sf, e.p.bwHz);
+    v.push_back(e);
+}
+
 // the plan's Meshtastic region and MeshCore preset: 0 EU, 1 US, 2 ANZ (Australia, New Zealand and the 915 - 928 MHz networks elsewhere),
 // 3 ANZ with MeshCore Mid (915.075 MHz, SF9, 125 kHz, 4/5)
 const char* mtRegionOf(int region) { return region == 1 ? "US" : region >= 2 ? "ANZ" : "EU_868"; }
@@ -132,6 +149,8 @@ struct MeshReceiver::Impl {
     std::vector<double> mcExtraBw;          // MeshCore: bandwidths searched on top of the presets' own (setMeshCoreBandwidths)
     bool customOn = false;
     MeshLoraSettings custom;
+    bool radio2On = false;                  // a second MeshCore channel searched beside the others (setRadio2)
+    MeshLoraSettings radio2;
     std::atomic<bool> dirty{true};
     std::atomic<bool> resetReq{false};
     std::function<void(const std::string&)> log;
@@ -178,11 +197,11 @@ struct MeshReceiver::Impl {
     double now() const { return curRate > 0 ? (double)nProc / curRate : 0; }
 
     void rebuild() {
-        double rt, off, tu; int reg, prot; bool all, cu; std::string mreg, mpre; MeshLoraSettings cs; std::vector<double> mcbw;
+        double rt, off, tu; int reg, prot; bool all, cu, r2on; std::string mreg, mpre; MeshLoraSettings cs, r2; std::vector<double> mcbw;
         {
             std::lock_guard<std::mutex> lk(mu);
             rt = rate; off = offsetHz; tu = tunedHz; reg = region; prot = protocols; all = presetSearch;
-            mreg = mtRegion; mpre = mtPreset; cu = customOn; cs = custom; mcbw = mcExtraBw;
+            mreg = mtRegion; mpre = mtPreset; cu = customOn; cs = custom; mcbw = mcExtraBw; r2on = radio2On; r2 = radio2;
             dirty = false;
         }
         curRate = rt; curOffset = off; curTuned = tu;
@@ -191,7 +210,8 @@ struct MeshReceiver::Impl {
         tel.inputRate = rt; tel.tunedHz = tu; tel.region = reg; tel.protocols = prot; tel.presetSearch = all;
         tel.mtRegion = !mreg.empty() ? mreg : mtRegionOf(reg); tel.custom = cu;
         if (rt <= 0) return;
-        const auto plan = cu ? customPlan(cs, tu, prot) : regionPlan(reg, prot, all, mreg, mpre, mcbw);
+        auto plan = cu ? customPlan(cs, tu, prot) : regionPlan(reg, prot, all, mreg, mpre, mcbw);
+        if (r2on && (prot & 2)) addRadio2(plan, r2);
         std::string inBand;
         for (const auto& e : plan) {
             MeshDecoderInfo d;
@@ -710,6 +730,10 @@ void MeshReceiver::setMeshCoreBandwidths(const std::vector<double>& extraBwHz) {
     if (v == p_->mcExtraBw) return;
     p_->mcExtraBw = std::move(v); p_->dirty = true;
 }
+void MeshReceiver::setRadio2(bool on, const MeshLoraSettings& s) {
+    std::lock_guard<std::mutex> lk(p_->mu);
+    p_->radio2On = on; p_->radio2 = s; p_->dirty = true;
+}
 void MeshReceiver::setCustom(bool on, const MeshLoraSettings& s) {
     std::lock_guard<std::mutex> lk(p_->mu);
     p_->customOn = on; p_->custom = s; p_->dirty = true;
@@ -717,6 +741,12 @@ void MeshReceiver::setCustom(bool on, const MeshLoraSettings& s) {
 bool MeshReceiver::addMeshtasticChannel(const std::string& name, const std::string& psk) { return p_->proto.addMeshtasticChannel(name, psk); }
 bool MeshReceiver::addMeshCoreChannel(const std::string& name, const std::string& secret) { return p_->proto.addMeshCoreChannel(name, secret); }
 void MeshReceiver::clearUserChannels() { p_->proto.clearUserChannels(); }
+
+double meshRadio2RateHz(double centreHz, double chanHz, double bwHz) {
+    if (!(bwHz > 0)) return 0;
+    const double need = std::max((std::fabs(chanHz - centreHz) + 0.5 * bwHz + 25e3) / 0.45, 2.2 * bwHz);   // the in-band test of rebuild()
+    return std::ceil((need + 1) / 0.5e6) * 0.5e6;   // up to the next 0.5 Msps (the test is strict)
+}
 
 ModeTuning meshTuning() {
     ModeTuning t;

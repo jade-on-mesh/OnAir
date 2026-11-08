@@ -860,6 +860,7 @@ void tuneDecode(App& a, double absMhz);                // sticky LO: decode absM
 void spectrumTune(App& a, double absMhz);              // spectrum / waterfall click (respects tuningMode)
 void uplinkNoteAdsb(const dect2::AdsbTelemetry& t);   // uplink_ui.cpp: callsigns heard by the ADS-B mode in this session
 double meshSampleRate(App& a);                  // mesh_ui.cpp: the radio rate the selected LoRa bandwidth needs (2 Msps; 4 above 500 kHz)
+bool meshRadio2Band(const App& a, double& mhz, double& bwMhz);   // mesh_ui.cpp: radio2's channel (a second MeshCore frequency) when it is on
 void dvbsStatusRows(App& a, const DvbsTelemetry& t, bool on, bool run);   // dvbs_ui.cpp: the lock lamps and readouts of a report (QO-100's decoder panel)
 void dvbsSetSymbolRate(App& a, double msym);   // dvbs_ui.cpp: the DVB-S/S2 symbol rate, set from elsewhere (the spectrum explorer)
 // wb_ui.cpp: the Signal workbench. A file dropped on the window opens in it (the mode is selected); the dev flags open and drive it for --shot runs
