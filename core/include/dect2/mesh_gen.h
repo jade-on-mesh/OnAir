@@ -28,6 +28,9 @@
 //   modeVal[0]  SNR of the weakest node in dB (0 = snrDb - 20); the others are spread evenly between it and snrDb
 //   modeVal[1]  bandwidth of the MeshCore network in Hz (868 / 915 scenes; 0 or outside 1 - 1625 kHz = the region's: 62.5 kHz EU / US,
 //               250 kHz ANZ); frequency, SF, CR and preamble stay the region's, LDRO follows the bandwidth
+//   modeVal[2]  radio2 (868 / 915 scenes): the MeshCore nodes are heard again on this frequency in Hz (0 = off), placed relative to the
+//               MeshCore channel; left out when it does not fit in the capture. modeOpt[5] its SF (0 = the network's), modeOpt[6] its CR
+//               (0 = the network's), modeVal[3] its bandwidth in Hz (0 = the network's)
 #pragma once
 #include "mode_synth.h"
 #include <memory>

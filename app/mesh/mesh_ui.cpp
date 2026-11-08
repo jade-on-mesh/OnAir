@@ -5,6 +5,7 @@
 #include "dect2/packet_aprs.h"
 #include "dect2/mesh_proto.h"
 #include "dect2/mesh_presets.h"
+#include "dect2/rate_choice.h"
 #include "results_export.h"
 #include "dect2/mesh_report.h"
 #include "dect2/u8file.h"
@@ -50,6 +51,10 @@ struct State {
     bool mcFromFile = false, mcListed = false;
     // MeshCore with the band plan's presets: more bandwidths (Hz) searched on each preset's frequency and SF (prefs "meshCoreExtraBw")
     std::vector<double> mcExtraBw;
+    // radio2: a second MeshCore channel decoded from the same capture, at its own frequency (prefs "meshRadio2", "meshRadio2Preset")
+    struct Radio2 { bool on = false; double mhz = 911.150, bwHz = 62500; int sf = 8, cr = 8; std::string preset; };
+    Radio2 r2;
+    std::string pushedR2 = "-";
     std::string pushedMcBw = "-";
     double mcAddKhz = 125;
     std::atomic<int> mcFetch{0};                 // 0 idle, 1 working, 2 done, 3 failed
@@ -176,6 +181,14 @@ void loadState() {
     S.mtPreset = d.getS("meshMtPreset", "LongFast");
     S.mcPreset = d.getS("meshCorePreset", "");
     {
+        int on = 0; State::Radio2 r;
+        if (sscanf(d.getS("meshRadio2", "").c_str(), "%d %lf %lf %d %d", &on, &r.mhz, &r.bwHz, &r.sf, &r.cr) == 5 && r.mhz > 0 && dect2::meshCoreBandwidthValid(r.bwHz)) {
+            r.on = on != 0; r.sf = std::max(5, std::min(12, r.sf)); r.cr = std::max(5, std::min(8, r.cr));
+            r.preset = d.getS("meshRadio2Preset", "");
+            S.r2 = r;
+        }
+    }
+    {
         std::istringstream bw(d.getS("meshCoreExtraBw", ""));
         double x;
         while (bw >> x) if (dect2::meshCoreBandwidthValid(x)) S.mcExtraBw.push_back(x);
@@ -268,6 +281,23 @@ bool bandwidthPicker(const char* id, double& bwHz, int listed = kNumBws) {
     return ch;
 }
 
+void saveRadio2() {
+    char b[96];
+    snprintf(b, sizeof b, "%d %.6f %.3f %d %d", S.r2.on ? 1 : 0, S.r2.mhz, S.r2.bwHz, S.r2.sf, S.r2.cr);
+    plat::prefs().setS("meshRadio2", b);
+    plat::prefs().setS("meshRadio2Preset", S.r2.preset);
+}
+// radio2 is searched in the MeshCore entry and in the mixed entry with MeshCore ticked
+bool radio2Shown(const App& a) { return !lorawanEntry(a) && (effProtocols(a) & 2); }
+bool radio2Active(const App& a) { return S.r2.on && radio2Shown(a); }
+dect2::MeshLoraSettings radio2Lora() {
+    dect2::MeshCorePresetEntry e;
+    e.title = "radio2"; e.mhz = S.r2.mhz; e.bwKhz = S.r2.bwHz / 1e3; e.sf = S.r2.sf; e.cr = S.r2.cr;
+    dect2::MeshLoraSettings l = dect2::meshCorePresetToLora(e);   // MeshCore's sync word 0x12 and preamble (32 up to SF8, else 16)
+    l.name = "radio2";
+    return l;
+}
+
 void saveMcExtraBw() {
     std::ostringstream o;
     o.precision(10);
@@ -338,7 +368,18 @@ double meshSampleRate(App& a) {
         dect2::MeshLoraSettings s;
         if (dect2::meshtasticRegionPreset(S.mtRegion, S.mtPreset, s)) bw = s.bwHz;
     }
-    return bw > 500e3 ? 4e6 : 2e6;
+    double rate = bw > 500e3 ? 4e6 : 2e6;
+    loadState();
+    if (radio2Active(a))   // wide enough that radio2's channel lies inside the capture too (the radio stays centred on the first frequency)
+        rate = std::max(rate, dect2::meshRadio2RateHz(radioCenterMhz(a) * 1e6, S.r2.mhz * 1e6, S.r2.bwHz));
+    return rate;
+}
+
+bool meshRadio2Band(const App& a, double& mhz, double& bwMhz) {
+    loadState();
+    if (!radio2Active(a)) return false;
+    mhz = S.r2.mhz; bwMhz = S.r2.bwHz / 1e6;
+    return true;
 }
 
 namespace {
@@ -364,6 +405,22 @@ void tick(App& a) {
             s.sf = c.sf; s.bwHz = c.bwHz; s.cr = c.cr; s.syncWord = (uint8_t)c.sync; s.preamble = c.preamble; s.ldro = dect2::meshLoraLdro(c.sf, c.bwHz);
             r.setCustom(on, s);
             S.pushedCustom = b;
+        }
+    }
+    {
+        char b[96];
+        const bool on = radio2Active(a);
+        snprintf(b, sizeof b, "%d %.6f %.3f %d %d", on ? 1 : 0, S.r2.mhz, S.r2.bwHz, S.r2.sf, S.r2.cr);
+        if (b != S.pushedR2) { r.setRadio2(on, radio2Lora()); S.pushedR2 = b; }
+    }
+    {   // the test signal plays radio2 too (mesh_gen.h modeVal[2]): the MeshCore nodes heard again on radio2's channel
+        SynthConfig& sc = a.tune.synth;
+        const bool on = radio2Active(a);
+        const double f = on ? S.r2.mhz * 1e6 : 0, bw = on ? S.r2.bwHz : 0;
+        const int sf = on ? S.r2.sf : 0, cr = on ? S.r2.cr : 0;
+        if (sc.modeVal[2] != f || sc.modeVal[3] != bw || sc.modeOpt[5] != sf || sc.modeOpt[6] != cr) {
+            sc.modeVal[2] = f; sc.modeVal[3] = bw; sc.modeOpt[5] = sf; sc.modeOpt[6] = cr;
+            if (a.engine.running() && a.engine.syntheticSource()) startReceiver(a);
         }
     }
     if (!S.keysPushed) { pushKeys(a); S.keysPushed = true; }
@@ -1256,6 +1313,90 @@ void loraSettings(App& a) {
     if (retune && a.engine.running()) startReceiver(a);
 }
 
+std::string r2Msps(double hz) { char b[32]; snprintf(b, sizeof b, "%g Msps", hz / 1e6); return b; }
+
+// radio2: a second MeshCore channel from the same capture, shown as a second band on the same spectrum and waterfall
+void radio2Settings(App& a) {
+    if (!radio2Shown(a)) return;
+    if (!S.mcListed) mcLoad();
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+    ImGui::TextDisabled("radio2: a second MeshCore channel");
+    bool ch = false, rateMayChange = false;
+    if (ImGui::Checkbox("Also decode a second MeshCore frequency (radio2)", &S.r2.on)) { ch = true; rateMayChange = true; }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("One more MeshCore channel, decoded from the same samples beside everything above, at its own frequency and LoRa setting.\n"
+                          "It shows as an amber band on the same spectrum and waterfall; its packets and its decoder are named \"radio2\".\n"
+                          "The radio stays on the first frequency and the sample rate is raised so that both channels fit in the capture.");
+    ImGui::BeginDisabled(!S.r2.on);
+    const dect2::MeshCorePresetEntry* cur = nullptr;
+    for (const auto& p : S.mcList) if (p.title == S.r2.preset) cur = &p;
+    ImGui::SetNextItemWidth(340 * gUi);
+    if (ImGui::BeginCombo("##r2pre", cur ? cur->title.c_str() : "Custom")) {
+        if (ImGui::Selectable("Custom", !cur)) { S.r2.preset.clear(); ch = true; }
+        for (const auto& reg : dect2::meshCoreRegions(S.mcList)) {
+            ImGui::TextDisabled("%s", reg.c_str());
+            for (const auto& p : S.mcList) {
+                if (p.region != reg) continue;
+                const std::string lab = p.title + "   " + dect2::meshCorePresetSummary(p) + "##r2p" + p.title;
+                if (ImGui::Selectable(lab.c_str(), cur && cur->title == p.title)) {
+                    S.r2.preset = p.title; S.r2.mhz = p.mhz; S.r2.bwHz = p.bwKhz * 1e3; S.r2.sf = p.sf; S.r2.cr = p.cr;
+                    ch = true; rateMayChange = true;
+                }
+            }
+        }
+        ImGui::EndCombo();
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("A MeshCore radio preset (meshcore.nz) fills in radio2's frequency and LoRa setting; Custom keeps the values below.");
+    bool edited = false;
+    ImGui::SetNextItemWidth(220 * gUi);
+    double mhz = S.r2.mhz;
+    if (ImGui::InputDouble("Frequency (MHz)##r2f", &mhz, 0.025, 1.0, "%.4f", ImGuiInputTextFlags_EnterReturnsTrue) && mhz > 0) { S.r2.mhz = mhz; edited = true; rateMayChange = true; }
+    if (bandwidthPicker("r2bw", S.r2.bwHz, kNumSubGhzBws)) { edited = true; rateMayChange = true; }
+    ImGui::SameLine(0, 6 * gUi); ImGui::TextUnformatted("Bandwidth");
+    ImGui::SetNextItemWidth(220 * gUi);
+    if (ImGui::SliderInt("Spreading factor##r2s", &S.r2.sf, 5, 12, "SF%d")) { S.r2.sf = std::max(5, std::min(12, S.r2.sf)); edited = true; }
+    int ci = S.r2.cr - 5;
+    static const char* crs[] = {"4/5", "4/6", "4/7", "4/8"};
+    ImGui::SetNextItemWidth(220 * gUi);
+    if (ImGui::Combo("Coding rate##r2c", &ci, crs, 4)) { S.r2.cr = ci + 5; edited = true; }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Each frame's header carries its coding rate: frames at any rate decode.");
+    if (edited) { S.r2.preset.clear(); ch = true; }   // the values no longer are the preset's
+    ImGui::EndDisabled();
+    if (ch) saveRadio2();
+
+    if (!S.r2.on) return;
+    // where it stands: inside the capture or not, and what it has heard
+    const double need = meshSampleRate(a);
+    const bool run = a.engine.running();
+    const double have = run ? a.engine.radioRate() : a.tune.sampleRate;
+    const dect2::MeshDecoderInfo* dec = nullptr;
+    if (run && live(a)) for (const auto& d : a.rx.mesh.decoders) if (d.preset.find("radio2") != std::string::npos) dec = &d;
+    ImGui::PushTextWrapPos(0);
+    const double offMhz = S.r2.mhz - a.freqMhz;
+    if (dec && dec->inBand)
+        ImGui::TextDisabled("radio2 is inside the capture (%+.3f MHz from the first frequency): %llu frames, %llu CRC errors%s", offMhz,
+                            (unsigned long long)dec->frames, (unsigned long long)dec->crcBad, dec->frames ? (", last SNR " + std::to_string((int)std::lround(dec->lastSnrDb)) + " dB").c_str() : "");
+    else if (dec && dec->preset != "radio2")
+        ImGui::TextDisabled("radio2 is the same channel and setting as \"%s\": no second demodulator is needed.", dec->preset.c_str());
+    if (have + 1 < need) {
+        const RateLimits lim = rateLimitsOf(a.devices[a.devIdx]);
+        ImGui::TextColored(pal::warnAmber(), "radio2 lies %.3f MHz from the first frequency: it needs %.1f Msps or more, the radio %s %.1f Msps.", std::fabs(offMhz),
+                           need / 1e6, run ? "runs at" : "is set to", have / 1e6);
+        if (lim.maxHz > 0 && need > lim.maxHz + 1)
+            ImGui::TextColored(pal::warnAmber(), "This radio goes up to %.1f Msps: tune the first frequency nearer radio2 (both have to fit in one capture).", lim.maxHz / 1e6);
+        else if (a.chosenRateHz > 0)
+            ImGui::TextColored(pal::warnAmber(), "A manual sample rate is set (RATE in the top bar): choose Auto, or %.1f Msps or more.", need / 1e6);
+        else if (run && ImGui::SmallButton(("Restart at " + r2Msps(need)).c_str())) startReceiver(a);
+    } else if (!run) ImGui::TextDisabled("Both channels fit in the capture at %s.", r2Msps(std::max(need, have)).c_str());
+    ImGui::PopTextWrapPos();
+    if (rateMayChange && run && a.chosenRateHz == 0 && have + 1 < meshSampleRate(a)) {
+        const RateLimits lim = rateLimitsOf(a.devices[a.devIdx]);
+        if (!(lim.maxHz > 0 && meshSampleRate(a) > lim.maxHz + 1)) startReceiver(a);   // opened again at the rate both channels need
+    }
+}
+
 void settingsView(App& a) {
     loadState();
     ImGui::TextDisabled("Band plan");
@@ -1298,6 +1439,7 @@ void settingsView(App& a) {
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Off: LongFast only (the default of every new node). On: also MediumFast, MediumSlow, ShortFast, ShortSlow, LongModerate\nand LongSlow, each on its own channel slot. Uses more CPU, and only the slots inside the captured band are searched.");
     ImGui::Spacing();
     loraSettings(a);
+    radio2Settings(a);
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();

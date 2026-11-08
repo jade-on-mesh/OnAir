@@ -159,6 +159,18 @@ public:
                 mc_.offsetHz = off;
                 mc_.bwHz = c.bwHz;
             }
+            // modeVal[2]: radio2, the same MeshCore nodes heard again on a second frequency (its own SF, CR and bandwidth: modeOpt[5], [6], modeVal[3])
+            if (cfg.modeVal[2] > 1e6 && mc_.on) {   // (above 1 MHz: other modes leave other values in these slots)
+                MeshLoraSettings r = c;
+                r.freqHz = cfg.modeVal[2];
+                if (cfg.modeOpt[5] >= 5 && cfg.modeOpt[5] <= 12) r.sf = cfg.modeOpt[5];
+                if (cfg.modeOpt[6] >= 5 && cfg.modeOpt[6] <= 8) r.cr = cfg.modeOpt[6];
+                if (meshCoreBandwidthValid(cfg.modeVal[3])) r.bwHz = cfg.modeVal[3];
+                r.preamble = r.sf <= 8 ? 32 : 16;
+                r.ldro = meshLoraLdro(r.sf, r.bwHz);
+                const double off2 = mc_.offsetHz + (r.freqHz - c.freqHz);
+                if (std::fabs(off2) + r.bwHz < 0.45 * rate) { mc2_.on = true; mc2_.p = toParams(r); mc2_.offsetHz = off2; mc2_.bwHz = r.bwHz; mc2_.nextFree = 0.4; }
+            }
         }
         if (region_ == 2) {
             // placed for a receiver tuned to MeshCom EU (433.175 MHz): MeshCom at -tuneOffsetHz, LoRa APRS 600 kHz above it
@@ -216,7 +228,7 @@ public:
         if (meshcoreNodeKeys(mcNodes_[1], sd, pub)) repeaterHash_ = pub[0];
         nextId_ = 0x10000000u + (rng_() & 0x0fffffffu);
         if (cfg.modeOpt[3] == 2) jitter_ = 0;
-        if (cfg.modeOpt[3] == 1) { mt_.nextFree = 1.0; mc_.nextFree = 1.0; ap_.nextFree = 1.0; mcm_.nextFree = 1.0; for (double& x : lwFreeAt_) x = 1.0; }
+        if (cfg.modeOpt[3] == 1) { mt_.nextFree = 1.0; mc_.nextFree = 1.0; ap_.nextFree = 1.0; mcm_.nextFree = 1.0; mc2_.nextFree = 1.0; for (double& x : lwFreeAt_) x = 1.0; }
     }
 
     double sampleRate() const override { return rate_; }
@@ -225,6 +237,7 @@ public:
         const double t0 = (double)pos_ / rate_, t1 = (double)(pos_ + n) / rate_;
         schedule(mt_, true, t1 + 1);
         schedule(mc_, false, t1 + 1);
+        schedule(mc2_, false, t1 + 1);
         schedule70(ap_, true, t1 + 1);
         schedule70(mcm_, false, t1 + 1);
         scheduleLw(t1 + 1);
@@ -394,7 +407,7 @@ private:
     std::mt19937 rng_;
     int region_ = 0;
     bool lorawan() const { return region_ == 3 || region_ == 4; }
-    Net mt_, mc_, ap_, mcm_;
+    Net mt_, mc_, ap_, mcm_, mc2_;
     double apSnr_[3] = {}, mcmSnr_[2] = {}, apCfo_[3] = {}, mcmCfo_[2] = {};
     bool lwOn_[3] = {};
     double lwOff_[3] = {}, lwFreeAt_[3] = {}, lwSnr_[6] = {}, lwCfo_[6] = {};
