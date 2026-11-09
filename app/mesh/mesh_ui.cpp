@@ -185,6 +185,14 @@ void loadState() {
         if (sscanf(d.getS("meshRadio2", "").c_str(), "%d %lf %lf %d %d", &on, &r.mhz, &r.bwHz, &r.sf, &r.cr) == 5 && r.mhz > 0 && dect2::meshCoreBandwidthValid(r.bwHz)) {
             r.on = on != 0; r.sf = std::max(5, std::min(12, r.sf)); r.cr = std::max(5, std::min(8, r.cr));
             r.preset = d.getS("meshRadio2Preset", "");
+            // The first builds started radio2 on SF8 4/8 (911.150 MHz), which hears nothing on MediaMesh (SF7 4/5): a setting saved by them that
+            // still has that SF and CR on 911.150 MHz was never chosen, so it becomes MediaMesh. Once (meshRadio2Ver); later choices stay.
+            if (d.getI("meshRadio2Ver", 0) < 1 && r.sf == 8 && r.cr == 8 && std::fabs(r.mhz - 911.150) < 1e-6 && r.preset.empty()) {
+                r.bwHz = 250000; r.sf = 7; r.cr = 5; r.preset = "MediaMesh";
+                char b[96];
+                snprintf(b, sizeof b, "%d %.6f %.3f %d %d", r.on ? 1 : 0, r.mhz, r.bwHz, r.sf, r.cr);
+                d.setS("meshRadio2", b); d.setS("meshRadio2Preset", r.preset);
+            }
             S.r2 = r;
         }
     }
@@ -282,6 +290,7 @@ bool bandwidthPicker(const char* id, double& bwHz, int listed = kNumBws) {
 }
 
 void saveRadio2() {
+    plat::prefs().setI("meshRadio2Ver", 1);   // saved by a build that starts radio2 on MediaMesh (see loadState)
     char b[96];
     snprintf(b, sizeof b, "%d %.6f %.3f %d %d", S.r2.on ? 1 : 0, S.r2.mhz, S.r2.bwHz, S.r2.sf, S.r2.cr);
     plat::prefs().setS("meshRadio2", b);
