@@ -651,9 +651,12 @@ void packetTable(const App& a) {
     if (on) {
         for (size_t i = t.packets.size(); i-- > 0;) {
             const dect2::MeshPacket& p = t.packets[i];
+            const bool r2 = meshIsRadio2(p.preset);
             ImGui::TableNextRow();
+            if (r2) ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, ImGui::GetColorU32(meshRadio2Colour(0.16f)));   // heard on radio2's channel
             ImGui::TableNextColumn(); ImGui::TextUnformatted(clock(p.timeSec).c_str());
-            ImGui::TableNextColumn(); ImGui::TextColored(protoColour(p.protocol), "%s", protoTag(p.protocol));
+            ImGui::TableNextColumn(); ImGui::TextColored(r2 ? meshRadio2Colour() : protoColour(p.protocol), "%s", protoTag(p.protocol));
+            if (r2 && ImGui::IsItemHovered()) ImGui::SetTooltip("radio2 (%.3f MHz)", p.freqHz / 1e6);
             ImGui::TableNextColumn();
             if (!p.crcOk) ImGui::TextColored(pal::badRed(), "CRC error");
             else ImGui::TextUnformatted(p.type.empty() ? "?" : p.type.c_str());
@@ -1326,12 +1329,12 @@ void radio2Settings(App& a) {
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();
-    ImGui::TextDisabled("radio2: a second MeshCore channel");
+    ImGui::TextColored(meshRadio2Colour(), "radio2: a second MeshCore channel");
     bool ch = false, rateMayChange = false;
     if (ImGui::Checkbox("Also decode a second MeshCore frequency (radio2)", &S.r2.on)) { ch = true; rateMayChange = true; }
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("One more MeshCore channel, decoded from the same samples beside everything above, at its own frequency and LoRa setting.\n"
-                          "It shows as an amber band on the same spectrum and waterfall; its packets and its decoder are named \"radio2\".\n"
+                          "It shows as a pink band on the same spectrum and waterfall; its packets and its decoder are named \"radio2\" and tinted pink.\n"
                           "The radio stays on the first frequency and the sample rate is raised so that both channels fit in the capture.");
     ImGui::BeginDisabled(!S.r2.on);
     const dect2::MeshCorePresetEntry* cur = nullptr;
@@ -1377,7 +1380,7 @@ void radio2Settings(App& a) {
     const bool run = a.engine.running();
     const double have = run ? a.engine.radioRate() : a.tune.sampleRate;
     const dect2::MeshDecoderInfo* dec = nullptr;
-    if (run && live(a)) for (const auto& d : a.rx.mesh.decoders) if (d.preset.find("radio2") != std::string::npos) dec = &d;
+    if (run && live(a)) for (const auto& d : a.rx.mesh.decoders) if (meshIsRadio2(d.preset)) dec = &d;
     ImGui::PushTextWrapPos(0);
     const double offMhz = S.r2.mhz - a.freqMhz;
     if (dec && dec->inBand)
@@ -1575,7 +1578,9 @@ void receiver(App& a) {
         for (const auto& d : t.decoders) {
             if (!d.inBand && d.protocol >= 3) continue;    // the 70 cm list is long: only the channels in the capture
             ImGui::TableNextRow();
-            ImGui::TableNextColumn(); ImGui::TextColored(protoColour(d.protocol), "%s", ellipsize(d.preset, ImGui::GetContentRegionAvail().x).c_str());
+            const bool r2 = meshIsRadio2(d.preset);
+            if (r2) ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, ImGui::GetColorU32(meshRadio2Colour(0.16f)));
+            ImGui::TableNextColumn(); ImGui::TextColored(r2 ? meshRadio2Colour() : protoColour(d.protocol), "%s", ellipsize(d.preset, ImGui::GetContentRegionAvail().x).c_str());
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", d.preset.c_str());
             ImGui::TableNextColumn(); ImGui::Text("%.3f", d.freqHz / 1e6);
             ImGui::TableNextColumn(); ImGui::Text("%d", d.sf);
@@ -1621,9 +1626,12 @@ void panels(App& a) {
         if (on) {
             for (size_t i = t.packets.size(); i-- > 0;) {
                 const dect2::MeshPacket& p = t.packets[i];
+                const bool r2 = meshIsRadio2(p.preset);
                 ImGui::TableNextRow();
+                if (r2) ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, ImGui::GetColorU32(meshRadio2Colour(0.16f)));   // heard on radio2's channel
                 ImGui::TableNextColumn(); ImGui::TextUnformatted(clock(p.timeSec).c_str());
-                ImGui::TableNextColumn(); ImGui::TextColored(protoColour(p.protocol), "%s", protoTag(p.protocol));
+                ImGui::TableNextColumn(); ImGui::TextColored(r2 ? meshRadio2Colour() : protoColour(p.protocol), "%s", protoTag(p.protocol));
+                if (r2 && ImGui::IsItemHovered()) ImGui::SetTooltip("radio2 (%.3f MHz)", p.freqHz / 1e6);
                 ImGui::TableNextColumn(); ImGui::TextUnformatted(ellipsize(p.crcOk ? (p.type.empty() ? "?" : p.type) : "CRC error", ImGui::GetContentRegionAvail().x).c_str());   // the stretched column of a narrow table
                 ImGui::TableNextColumn(); ImGui::TextUnformatted(p.from.c_str());
                 ImGui::TableNextColumn(); ImGui::Text("%.1f", p.snrDb);
