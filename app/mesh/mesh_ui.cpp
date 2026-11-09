@@ -52,7 +52,7 @@ struct State {
     // MeshCore with the band plan's presets: more bandwidths (Hz) searched on each preset's frequency and SF (prefs "meshCoreExtraBw")
     std::vector<double> mcExtraBw;
     // radio2: a second MeshCore channel decoded from the same capture, at its own frequency (prefs "meshRadio2", "meshRadio2Preset")
-    struct Radio2 { bool on = false; double mhz = 911.150, bwHz = 62500; int sf = 8, cr = 8; std::string preset; };
+    struct Radio2 { bool on = false; double mhz = 911.150, bwHz = 250000; int sf = 7, cr = 5; std::string preset = "MediaMesh"; };   // MediaMesh by default
     Radio2 r2;
     std::string pushedR2 = "-";
     std::string pushedMcBw = "-";
@@ -1322,6 +1322,14 @@ void loraSettings(App& a) {
 
 std::string r2Msps(double hz) { char b[32]; snprintf(b, sizeof b, "%g Msps", hz / 1e6); return b; }
 
+// radio2's own presets, besides meshcore.nz's: MediaMesh, the media side channel of the Keymind Cascade firmware (`set radio2 mediamesh` /
+// `mediamesh-range` on a repeater: 911.150 MHz, SF7, CR 4/5, 250 or 125 kHz). Its nodes may send long preambles (automatic, up to 512 symbols): they decode.
+struct Radio2Preset { const char* title; double mhz, bwKhz; int sf, cr; const char* hint; };
+const Radio2Preset kRadio2Presets[] = {
+    {"MediaMesh", 911.150, 250, 7, 5, "set radio2 mediamesh"},
+    {"MediaMesh range", 911.150, 125, 7, 5, "set radio2 mediamesh-range"},
+};
+
 // radio2: a second MeshCore channel from the same capture, shown as a second band on the same spectrum and waterfall
 void radio2Settings(App& a) {
     if (!radio2Shown(a)) return;
@@ -1339,9 +1347,21 @@ void radio2Settings(App& a) {
     ImGui::BeginDisabled(!S.r2.on);
     const dect2::MeshCorePresetEntry* cur = nullptr;
     for (const auto& p : S.mcList) if (p.title == S.r2.preset) cur = &p;
+    const Radio2Preset* own = nullptr;
+    for (const auto& p : kRadio2Presets) if (S.r2.preset == p.title) own = &p;
     ImGui::SetNextItemWidth(340 * gUi);
-    if (ImGui::BeginCombo("##r2pre", cur ? cur->title.c_str() : "Custom")) {
-        if (ImGui::Selectable("Custom", !cur)) { S.r2.preset.clear(); ch = true; }
+    if (ImGui::BeginCombo("##r2pre", own ? own->title : cur ? cur->title.c_str() : "Custom")) {
+        if (ImGui::Selectable("Custom", !cur && !own)) { S.r2.preset.clear(); ch = true; }
+        ImGui::TextDisabled("MediaMesh (Keymind Cascade radio2)");
+        for (const auto& p : kRadio2Presets) {
+            char lab[160];
+            snprintf(lab, sizeof lab, "%s   %.3f MHz / %g kHz / SF%d / CR 4/%d##r2o%s", p.title, p.mhz, p.bwKhz, p.sf, p.cr, p.title);
+            if (ImGui::Selectable(lab, own == &p)) {
+                S.r2.preset = p.title; S.r2.mhz = p.mhz; S.r2.bwHz = p.bwKhz * 1e3; S.r2.sf = p.sf; S.r2.cr = p.cr;
+                ch = true; rateMayChange = true;
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("The repeaters' `%s`.", p.hint);
+        }
         for (const auto& reg : dect2::meshCoreRegions(S.mcList)) {
             ImGui::TextDisabled("%s", reg.c_str());
             for (const auto& p : S.mcList) {
@@ -1355,7 +1375,8 @@ void radio2Settings(App& a) {
         }
         ImGui::EndCombo();
     }
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("A MeshCore radio preset (meshcore.nz) fills in radio2's frequency and LoRa setting; Custom keeps the values below.");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("MediaMesh (the Keymind Cascade radio2 media channel) or a MeshCore radio preset (meshcore.nz) fills in radio2's\n"
+                                                  "frequency and LoRa setting; Custom keeps the values below.");
     bool edited = false;
     ImGui::SetNextItemWidth(220 * gUi);
     double mhz = S.r2.mhz;

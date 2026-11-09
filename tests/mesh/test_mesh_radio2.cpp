@@ -200,6 +200,30 @@ int main() {
               (unsigned long long)f1);
     }
 
+    // 7. MediaMesh (Keymind Cascade `set radio2 mediamesh`: 911.150 MHz, 250 kHz, SF7, CR 4/5, automatic scan-aware preamble): the transmitters'
+    //    preamble can be longer than MeshCore's usual 32 symbols (up to 512); radio2 set to MediaMesh catches each
+    for (int pre : {32, 64, 128, 512}) {
+        MeshLoraSettings mm = mc(911.150, 7, 250, 5);
+        MeshLoraSettings tx = mm;
+        tx.preamble = pre;
+        MeshReceiver rx;
+        rx.setRegion(1); rx.setProtocols(2);
+        rx.setRadio2(true, mm);
+        const MeshTelemetry t = run(rx, {{us, meshcoreAdvert(a, 1790000000), 0.05}, {tx, meshcoreAdvert(b, 1790000000), 0.06}}, tuned, 2e6);
+        const MeshDecoderInfo* d = decoder(t, "radio2");
+        printf("MediaMesh SF7 250 kHz, sent with a %d-symbol preamble: radio2 %d packets, %llu bad, both nodes %d\n", pre, packets(t, "radio2"),
+               d ? (unsigned long long)(d->crcBad + d->headerBad + d->syncBad) : 0ULL, node(t, a.name) && node(t, b.name));
+        CHECK(d && d->inBand && packets(t, "radio2") == 1 && node(t, b.name), "MediaMesh with a %d-symbol preamble", pre);
+        // the setting of the screenshot that heard nothing: SF8 4/8 on MediaMesh's channel
+        if (pre == 32) {
+            MeshReceiver wrong;
+            wrong.setRegion(1); wrong.setProtocols(2);
+            wrong.setRadio2(true, mc(911.150, 8, 250, 8));
+            const MeshTelemetry tw = run(wrong, {{tx, meshcoreAdvert(b, 1790000000), 0.06}}, tuned, 2e6);
+            CHECK(packets(tw, "radio2") == 0, "SF8 does not decode SF7 MediaMesh");
+        }
+    }
+
     printf(fails ? "FAILED (%d)\n" : "OK\n", fails);
     return fails ? 1 : 0;
 }
