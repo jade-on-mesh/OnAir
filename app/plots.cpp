@@ -126,16 +126,16 @@ void channelWidthPopup(App& a) {
     ImGui::PopTextWrapPos();
 }
 
-// Mesh radio2 (a second MeshCore frequency decoded from the same capture): an amber band and centre line, and its name at the top of the plot
+// Mesh radio2 (a second MeshCore frequency decoded from the same capture): a pink band and centre line, and its name at the top of the plot
 static void radio2Band(const App& a, bool fill) {
     double mhz, bw;
     if (a.family + 2 != 22 || !meshRadio2Band(a, mhz, bw)) return;
-    const ImVec4 amber(0.95f, 0.75f, 0.25f, 1.f);
-    if (fill) { plt::Spec b; b.FillColor = ImVec4(amber.x, amber.y, amber.z, 0.16f); plt::PlotVBand("r2band", mhz - bw / 2, mhz + bw / 2, b); }
+    const ImVec4 pink = meshRadio2Colour();
+    if (fill) { plt::Spec b; b.FillColor = ImVec4(pink.x, pink.y, pink.z, 0.16f); plt::PlotVBand("r2band", mhz - bw / 2, mhz + bw / 2, b); }
     const double e[2] = {mhz - bw / 2, mhz + bw / 2}, c[1] = {mhz};
-    plt::Spec es; es.LineColor = ImVec4(amber.x, amber.y, amber.z, fill ? 0.55f : 0.70f); es.LineWeight = 1.f;
+    plt::Spec es; es.LineColor = ImVec4(pink.x, pink.y, pink.z, fill ? 0.55f : 0.70f); es.LineWeight = 1.f;
     plt::PlotInfLines("r2edges", e, 2, es);
-    plt::Spec cs; cs.LineColor = ImVec4(amber.x, amber.y, amber.z, 0.85f); cs.LineWeight = 1.2f;
+    plt::Spec cs; cs.LineColor = ImVec4(pink.x, pink.y, pink.z, 0.85f); cs.LineWeight = 1.2f;
     plt::PlotInfLines("r2centre", c, 1, cs);
     const plt::Rect lim = plt::GetPlotLimits();
     if (!(lim.X.Max > lim.X.Min) || mhz < lim.X.Min || mhz > lim.X.Max) return;   // off the visible span
@@ -147,7 +147,7 @@ static void radio2Band(const App& a, bool fill) {
     const ImVec2 q(std::min(x + 4 * gUi, pp.x + ps.x - ts.x - 4 * gUi), pp.y + (fill ? 4 : 2) * gUi);
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddRectFilled(ImVec2(q.x - 3 * gUi, q.y - 1 * gUi), ImVec2(q.x + ts.x + 3 * gUi, q.y + ts.y + 1 * gUi), IM_COL32(20, 22, 26, 200), 3.f * gUi);
-    dl->AddText(q, ImGui::GetColorU32(amber), lb);
+    dl->AddText(q, ImGui::GetColorU32(pink), lb);
 }
 
 // The channel band behind the trace (spectrum: a light fill and its edges) or on top of the picture (waterfall: the edges only)

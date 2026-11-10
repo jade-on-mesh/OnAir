@@ -6,10 +6,13 @@
 #include "dect2/mesh_proto.h"
 #include "dect2/mesh_presets.h"
 #include "dect2/rate_choice.h"
+#include "dect2/audioout.h"
 #include "results_export.h"
 #include "dect2/mesh_report.h"
 #include "dect2/u8file.h"
 #include <algorithm>
+#include <chrono>
+#include <memory>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -52,9 +55,26 @@ struct State {
     // MeshCore with the band plan's presets: more bandwidths (Hz) searched on each preset's frequency and SF (prefs "meshCoreExtraBw")
     std::vector<double> mcExtraBw;
     // radio2: a second MeshCore channel decoded from the same capture, at its own frequency (prefs "meshRadio2", "meshRadio2Preset")
-    struct Radio2 { bool on = false; double mhz = 911.150, bwHz = 62500; int sf = 8, cr = 8; std::string preset; };
+    struct Radio2 { bool on = false; double mhz = 911.150, bwHz = 250000; int sf = 7, cr = 5; std::string preset = "MediaMesh"; };   // MediaMesh by default
     Radio2 r2;
     std::string pushedR2 = "-";
+    // radio2 beep (prefs "meshRadio2Beep"): a short tone for each frame radio2 decodes with a good CRC
+    bool r2Beep = false;
+    uint64_t r2BeepGood = 0;                      // radio2's good frames already beeped for (its decoder counts from the receiver's start)
+    std::unique_ptr<dect2::AudioOut> beepOut;    // its own little output stream, opened at the first beep
+    bool beepFailed = false;                     // no sound device: the setting says so
+    std::chrono::steady_clock::time_point beepLast{};
+    uint64_t r2SeenBad = 0;                      // radio2's bad frames already counted
+    // MediaMesh activity (the MediaMesh view): radio2's good and bad frames per minute of wall-clock time, and the minutes OnAir listened with
+    // radio2 on (a minute with no entry was not listened to). Appended to <data>/mediamesh-activity.txt. Minutes are kept for a month; older
+    // ones are summed into hours (with the minutes listened in each), kept for a year.
+    struct Minute { uint32_t good = 0, bad = 0; };
+    struct Hour { uint32_t good = 0, bad = 0, listened = 0; };
+    std::map<int64_t, Minute> act;               // by unix minute
+    std::map<int64_t, Hour> actH;                // by the unix minute the hour starts at
+    bool actLoaded = false;
+    int64_t actMinute = -1;                      // the minute being counted (written to the file when it ends)
+    int actRange = 3;                            // index in kActRanges (prefs "meshActRange")
     std::string pushedMcBw = "-";
     double mcAddKhz = 125;
     std::atomic<int> mcFetch{0};                 // 0 idle, 1 working, 2 done, 3 failed
@@ -180,11 +200,21 @@ void loadState() {
     S.mtRegion = d.getS("meshMtRegion", "");
     S.mtPreset = d.getS("meshMtPreset", "LongFast");
     S.mcPreset = d.getS("meshCorePreset", "");
+    S.r2Beep = d.getB("meshRadio2Beep", false);
+    S.actRange = std::max(0, std::min(10, (int)d.getI("meshActRange", 3)));
     {
         int on = 0; State::Radio2 r;
         if (sscanf(d.getS("meshRadio2", "").c_str(), "%d %lf %lf %d %d", &on, &r.mhz, &r.bwHz, &r.sf, &r.cr) == 5 && r.mhz > 0 && dect2::meshCoreBandwidthValid(r.bwHz)) {
             r.on = on != 0; r.sf = std::max(5, std::min(12, r.sf)); r.cr = std::max(5, std::min(8, r.cr));
             r.preset = d.getS("meshRadio2Preset", "");
+            // The first builds started radio2 on SF8 4/8 (911.150 MHz), which hears nothing on MediaMesh (SF7 4/5): a setting saved by them that
+            // still has that SF and CR on 911.150 MHz was never chosen, so it becomes MediaMesh. Once (meshRadio2Ver); later choices stay.
+            if (d.getI("meshRadio2Ver", 0) < 1 && r.sf == 8 && r.cr == 8 && std::fabs(r.mhz - 911.150) < 1e-6 && r.preset.empty()) {
+                r.bwHz = 250000; r.sf = 7; r.cr = 5; r.preset = "MediaMesh";
+                char b[96];
+                snprintf(b, sizeof b, "%d %.6f %.3f %d %d", r.on ? 1 : 0, r.mhz, r.bwHz, r.sf, r.cr);
+                d.setS("meshRadio2", b); d.setS("meshRadio2Preset", r.preset);
+            }
             S.r2 = r;
         }
     }
@@ -282,6 +312,7 @@ bool bandwidthPicker(const char* id, double& bwHz, int listed = kNumBws) {
 }
 
 void saveRadio2() {
+    plat::prefs().setI("meshRadio2Ver", 1);   // saved by a build that starts radio2 on MediaMesh (see loadState)
     char b[96];
     snprintf(b, sizeof b, "%d %.6f %.3f %d %d", S.r2.on ? 1 : 0, S.r2.mhz, S.r2.bwHz, S.r2.sf, S.r2.cr);
     plat::prefs().setS("meshRadio2", b);
@@ -296,6 +327,98 @@ dect2::MeshLoraSettings radio2Lora() {
     dect2::MeshLoraSettings l = dect2::meshCorePresetToLora(e);   // MeshCore's sync word 0x12 and preamble (32 up to SF8, else 16)
     l.name = "radio2";
     return l;
+}
+
+// The beep: 70 ms at 1.6 kHz with 6 ms raised-cosine edges (no click), after 15 ms of silence so the stream starts cleanly. At most one every
+// 150 ms: a burst of packets is a few beeps, not a buzz. Follows the app's volume and mute (and stays silent in a receiver without the sound).
+void radio2Beep(const App& a) {
+    if (a.muted || a.rxForcedMute || a.volume <= 0.f || S.beepFailed) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (S.beepLast.time_since_epoch().count() && now - S.beepLast < std::chrono::milliseconds(150)) return;
+    S.beepLast = now;
+    if (!S.beepOut) {
+        S.beepOut = std::make_unique<dect2::AudioOut>();
+        S.beepOut->setStartThreshold(256);
+        if (!S.beepOut->start(48000)) { S.beepOut.reset(); S.beepFailed = true; return; }
+    }
+    const int rate = S.beepOut->sampleRate() > 0 ? S.beepOut->sampleRate() : 48000;
+    const int lead = rate * 15 / 1000, n = rate * 70 / 1000, edge = rate * 6 / 1000;
+    std::vector<float> buf(2 * (size_t)(lead + n), 0.f);
+    const float amp = 0.22f * std::min(1.f, a.volume);
+    for (int i = 0; i < n; i++) {
+        float g = 1.f;
+        if (i < edge) g = 0.5f - 0.5f * std::cos((float)M_PI * i / edge);
+        else if (i >= n - edge) g = 0.5f - 0.5f * std::cos((float)M_PI * (n - 1 - i) / edge);
+        const float v = amp * g * std::sin(2.f * (float)M_PI * 1600.f * i / rate);
+        buf[2 * (size_t)(lead + i)] = buf[2 * (size_t)(lead + i) + 1] = v;
+    }
+    S.beepOut->write(buf.data(), lead + n);
+}
+
+// MediaMesh activity log: a line "unix-minute good bad" per minute listened, and "h hour-minute good bad listened" per hour summed after a
+// month. Read at the start (sums lines of the same minute or hour), old minutes folded into hours, and rewritten compacted.
+constexpr int64_t kActKeepMin = 31 * 24 * 60, kActKeepHourMin = 366 * 24 * 60;
+std::string actFile() { return plat::dataDir() + "/mediamesh-activity.txt"; }
+void actPrune() {
+    const int64_t now = (int64_t)(std::time(nullptr) / 60);
+    while (!S.act.empty() && S.act.begin()->first < now - kActKeepMin) {
+        const auto it = S.act.begin();
+        auto& h = S.actH[it->first - ((it->first % 60) + 60) % 60];
+        h.good += it->second.good; h.bad += it->second.bad; h.listened++;
+        S.act.erase(it);
+    }
+    while (!S.actH.empty() && S.actH.begin()->first < now - kActKeepHourMin) S.actH.erase(S.actH.begin());
+}
+void actLoad() {
+    if (S.actLoaded) return;
+    S.actLoaded = true;
+    std::ifstream f(actFile());
+    std::string ln;
+    while (std::getline(f, ln)) {
+        long long m; unsigned g, b, l;
+        if (ln.size() > 2 && ln[0] == 'h') {
+            if (sscanf(ln.c_str() + 1, "%lld %u %u %u", &m, &g, &b, &l) == 4) { auto& h = S.actH[m]; h.good += g; h.bad += b; h.listened += l; }
+        } else if (sscanf(ln.c_str(), "%lld %u %u", &m, &g, &b) == 3) { auto& x = S.act[m]; x.good += g; x.bad += b; }
+    }
+    f.close();
+    actPrune();
+    std::ofstream o(actFile(), std::ios::trunc);
+    for (const auto& [hh, h] : S.actH) o << 'h' << hh << ' ' << h.good << ' ' << h.bad << ' ' << h.listened << '\n';
+    for (const auto& [mm, x] : S.act) o << mm << ' ' << x.good << ' ' << x.bad << '\n';
+}
+void actFlush() {   // the minute that ended goes to the file
+    if (S.actMinute < 0) return;
+    const auto it = S.act.find(S.actMinute);
+    if (it != S.act.end()) { std::ofstream o(actFile(), std::ios::app); o << it->first << ' ' << it->second.good << ' ' << it->second.bad << '\n'; }
+    S.actMinute = -1;
+}
+
+// the minute being counted when OnAir closes goes to the file too (a later start adds to the same minute)
+struct ActAtExit { ~ActAtExit() { actFlush(); } } gActAtExit;
+
+// every frame while the receiver runs with radio2 on: new good / bad frames of radio2's decoder go to the activity of this minute, and a new
+// good one beeps when the beep is on. Its counts start again when the receiver starts or rebuilds its plan (then all of them are new).
+void radio2Tick(const App& a) {
+    if (!radio2Active(a) || !a.engine.running() || !live(a)) { actFlush(); return; }
+    const dect2::MeshDecoderInfo* dec = nullptr;
+    for (const auto& d : a.rx.mesh.decoders) if (meshIsRadio2(d.preset)) dec = &d;
+    if (!dec) return;
+    actLoad();
+    const uint64_t bad = std::min(dec->frames, dec->crcBad), good = dec->frames - bad;
+    const uint64_t dg = good >= S.r2BeepGood ? good - S.r2BeepGood : good, db = bad >= S.r2SeenBad ? bad - S.r2SeenBad : bad;
+    S.r2BeepGood = good; S.r2SeenBad = bad;
+    const int64_t m = (int64_t)(std::time(nullptr) / 60);
+    if (m != S.actMinute) { actFlush(); S.actMinute = m; actPrune(); }
+    auto& x = S.act[m];   // listened this minute, even with nothing heard
+    x.good += (uint32_t)dg; x.bad += (uint32_t)db;
+    if (dg > 0 && S.r2Beep) radio2Beep(a);
+}
+
+void radio2BeepToggle(bool on) {
+    S.r2Beep = on;
+    plat::prefs().setB("meshRadio2Beep", on);
+    S.beepFailed = false;
+    if (!on && S.beepOut) { S.beepOut->stop(); S.beepOut.reset(); }   // no stream left open while it is off
 }
 
 void saveMcExtraBw() {
@@ -437,7 +560,8 @@ void tick(App& a) {
     }
     if (S.pushedPresets != (int)S.allPresets) { r.setPresetSearch(S.allPresets); S.pushedPresets = (int)S.allPresets; }
     if (S.pushedTuned != a.freqMhz) { r.setTunedHz(a.freqMhz * 1e6); S.pushedTuned = a.freqMhz; }   // the engine does not pass the user's frequency
-    if (!a.engine.running()) { S.lastSeq = 0; S.logPrimed = false; return; }
+    radio2Tick(a);
+    if (!a.engine.running()) { S.lastSeq = 0; S.logPrimed = false; S.r2BeepGood = 0; S.r2SeenBad = 0; return; }
     if (live(a) && a.rx.seq != S.lastSeq) {
         S.lastSeq = a.rx.seq;
         logPositions(a);
@@ -651,9 +775,12 @@ void packetTable(const App& a) {
     if (on) {
         for (size_t i = t.packets.size(); i-- > 0;) {
             const dect2::MeshPacket& p = t.packets[i];
+            const bool r2 = meshIsRadio2(p.preset);
             ImGui::TableNextRow();
+            if (r2) ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, ImGui::GetColorU32(meshRadio2Colour(0.16f)));   // heard on radio2's channel
             ImGui::TableNextColumn(); ImGui::TextUnformatted(clock(p.timeSec).c_str());
-            ImGui::TableNextColumn(); ImGui::TextColored(protoColour(p.protocol), "%s", protoTag(p.protocol));
+            ImGui::TableNextColumn(); ImGui::TextColored(r2 ? meshRadio2Colour() : protoColour(p.protocol), "%s", protoTag(p.protocol));
+            if (r2 && ImGui::IsItemHovered()) ImGui::SetTooltip("radio2 (%.3f MHz)", p.freqHz / 1e6);
             ImGui::TableNextColumn();
             if (!p.crcOk) ImGui::TextColored(pal::badRed(), "CRC error");
             else ImGui::TextUnformatted(p.type.empty() ? "?" : p.type.c_str());
@@ -1319,6 +1446,14 @@ void loraSettings(App& a) {
 
 std::string r2Msps(double hz) { char b[32]; snprintf(b, sizeof b, "%g Msps", hz / 1e6); return b; }
 
+// radio2's own presets, besides meshcore.nz's: MediaMesh, the media side channel of the Keymind Cascade firmware (`set radio2 mediamesh` /
+// `mediamesh-range` on a repeater: 911.150 MHz, SF7, CR 4/5, 250 or 125 kHz). Its nodes may send long preambles (automatic, up to 512 symbols): they decode.
+struct Radio2Preset { const char* title; double mhz, bwKhz; int sf, cr; const char* hint; };
+const Radio2Preset kRadio2Presets[] = {
+    {"MediaMesh", 911.150, 250, 7, 5, "set radio2 mediamesh"},
+    {"MediaMesh range", 911.150, 125, 7, 5, "set radio2 mediamesh-range"},
+};
+
 // radio2: a second MeshCore channel from the same capture, shown as a second band on the same spectrum and waterfall
 void radio2Settings(App& a) {
     if (!radio2Shown(a)) return;
@@ -1326,19 +1461,31 @@ void radio2Settings(App& a) {
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();
-    ImGui::TextDisabled("radio2: a second MeshCore channel");
+    ImGui::TextColored(meshRadio2Colour(), "radio2: a second MeshCore channel");
     bool ch = false, rateMayChange = false;
     if (ImGui::Checkbox("Also decode a second MeshCore frequency (radio2)", &S.r2.on)) { ch = true; rateMayChange = true; }
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("One more MeshCore channel, decoded from the same samples beside everything above, at its own frequency and LoRa setting.\n"
-                          "It shows as an amber band on the same spectrum and waterfall; its packets and its decoder are named \"radio2\".\n"
+                          "It shows as a pink band on the same spectrum and waterfall; its packets and its decoder are named \"radio2\" and tinted pink.\n"
                           "The radio stays on the first frequency and the sample rate is raised so that both channels fit in the capture.");
     ImGui::BeginDisabled(!S.r2.on);
     const dect2::MeshCorePresetEntry* cur = nullptr;
     for (const auto& p : S.mcList) if (p.title == S.r2.preset) cur = &p;
+    const Radio2Preset* own = nullptr;
+    for (const auto& p : kRadio2Presets) if (S.r2.preset == p.title) own = &p;
     ImGui::SetNextItemWidth(340 * gUi);
-    if (ImGui::BeginCombo("##r2pre", cur ? cur->title.c_str() : "Custom")) {
-        if (ImGui::Selectable("Custom", !cur)) { S.r2.preset.clear(); ch = true; }
+    if (ImGui::BeginCombo("##r2pre", own ? own->title : cur ? cur->title.c_str() : "Custom")) {
+        if (ImGui::Selectable("Custom", !cur && !own)) { S.r2.preset.clear(); ch = true; }
+        ImGui::TextDisabled("MediaMesh (Keymind Cascade radio2)");
+        for (const auto& p : kRadio2Presets) {
+            char lab[160];
+            snprintf(lab, sizeof lab, "%s   %.3f MHz / %g kHz / SF%d / CR 4/%d##r2o%s", p.title, p.mhz, p.bwKhz, p.sf, p.cr, p.title);
+            if (ImGui::Selectable(lab, own == &p)) {
+                S.r2.preset = p.title; S.r2.mhz = p.mhz; S.r2.bwHz = p.bwKhz * 1e3; S.r2.sf = p.sf; S.r2.cr = p.cr;
+                ch = true; rateMayChange = true;
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("The repeaters' `%s`.", p.hint);
+        }
         for (const auto& reg : dect2::meshCoreRegions(S.mcList)) {
             ImGui::TextDisabled("%s", reg.c_str());
             for (const auto& p : S.mcList) {
@@ -1352,7 +1499,8 @@ void radio2Settings(App& a) {
         }
         ImGui::EndCombo();
     }
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("A MeshCore radio preset (meshcore.nz) fills in radio2's frequency and LoRa setting; Custom keeps the values below.");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("MediaMesh (the Keymind Cascade radio2 media channel) or a MeshCore radio preset (meshcore.nz) fills in radio2's\n"
+                                                  "frequency and LoRa setting; Custom keeps the values below.");
     bool edited = false;
     ImGui::SetNextItemWidth(220 * gUi);
     double mhz = S.r2.mhz;
@@ -1367,6 +1515,14 @@ void radio2Settings(App& a) {
     if (ImGui::Combo("Coding rate##r2c", &ci, crs, 4)) { S.r2.cr = ci + 5; edited = true; }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Each frame's header carries its coding rate: frames at any rate decode.");
     if (edited) { S.r2.preset.clear(); ch = true; }   // the values no longer are the preset's
+    bool beep = S.r2Beep;
+    if (ImGui::Checkbox("Beep for each radio2 packet", &beep)) radio2BeepToggle(beep);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("A short beep each time radio2 (MediaMesh) decodes a packet with a good CRC; at most one every 150 ms.\n"
+                                                  "Follows the volume and mute of the top bar.");
+    ImGui::SameLine(0, 8 * gUi);
+    if (ImGui::SmallButton("Test##r2beep")) { const bool keep = S.r2Beep; S.r2Beep = true; S.beepLast = {}; radio2Beep(a); S.r2Beep = keep; }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Play the beep once.");
+    if (S.beepFailed) { ImGui::SameLine(0, 8 * gUi); ImGui::TextColored(pal::warnAmber(), "no sound output"); }
     ImGui::EndDisabled();
     if (ch) saveRadio2();
 
@@ -1377,7 +1533,7 @@ void radio2Settings(App& a) {
     const bool run = a.engine.running();
     const double have = run ? a.engine.radioRate() : a.tune.sampleRate;
     const dect2::MeshDecoderInfo* dec = nullptr;
-    if (run && live(a)) for (const auto& d : a.rx.mesh.decoders) if (d.preset.find("radio2") != std::string::npos) dec = &d;
+    if (run && live(a)) for (const auto& d : a.rx.mesh.decoders) if (meshIsRadio2(d.preset)) dec = &d;
     ImGui::PushTextWrapPos(0);
     const double offMhz = S.r2.mhz - a.freqMhz;
     if (dec && dec->inBand)
@@ -1496,26 +1652,136 @@ void settingsView(App& a) {
 
 // ---------------------------------------------------------------- the hooks
 
+// The MediaMesh view: radio2's packets over time (1 hour to a month), from the activity log
+struct ActRange { const char* label; int64_t spanMin, binMin, tickMin; bool days; };
+const ActRange kActRanges[] = {
+    {"1 h", 60, 1, 10, false},          {"3 h", 180, 3, 30, false},        {"6 h", 360, 5, 60, false},
+    {"12 h", 720, 10, 120, false},      {"1 day", 1440, 20, 240, false},   {"3 days", 4320, 60, 720, true},
+    {"1 week", 10080, 120, 1440, true}, {"1 month", 43200, 720, 7200, true}, {"3 months", 129600, 1440, 20160, true},
+    {"6 months", 262080, 2880, 43200, true}, {"1 year", 525600, 5760, 86400, true},
+};
+constexpr int kNumActRanges = (int)(sizeof(kActRanges) / sizeof(kActRanges[0]));
+
+void mediaMeshView(App& a) {
+    actLoad();
+    ImGui::TextColored(meshRadio2Colour(), "MediaMesh activity");
+    ImGui::SameLine(0, 10 * gUi);
+    ImGui::TextDisabled("radio2 packets over time");
+    for (int i = 0; i < kNumActRanges; i++) {
+        if (i) ImGui::SameLine(0, 4 * gUi);
+        const bool sel = i == S.actRange;
+        if (sel) ImGui::PushStyleColor(ImGuiCol_Button, meshRadio2Colour(0.45f));
+        if (ImGui::SmallButton(kActRanges[i].label)) { S.actRange = i; plat::prefs().setI("meshActRange", i); }
+        if (sel) ImGui::PopStyleColor();
+    }
+    const ActRange& R = kActRanges[S.actRange];
+    const time_t nowT = std::time(nullptr);
+    // bins aligned to the local clock (a 12-hour bin runs from midnight or noon); the last one holds the current minute
+    const time_t gm = [&] { std::tm g = *std::gmtime(&nowT); g.tm_isdst = -1; return std::mktime(&g); }();
+    const int64_t tzMin = (int64_t)std::llround(std::difftime(nowT, gm) / 60.0);
+    const int64_t nowMin = (int64_t)(nowT / 60), localNow = nowMin + tzMin;
+    const int64_t lastBinL = localNow - (((localNow % R.binMin) + R.binMin) % R.binMin);   // local minute where the current bin starts
+    const int nb = (int)((R.spanMin + R.binMin - 1) / R.binMin);
+    const int64_t firstL = lastBinL - (int64_t)(nb - 1) * R.binMin;
+    // the bins are summed again only when the range, the minute or the counts change (a year is ~50 000 entries)
+    struct Cache { int range = -1; int64_t now = -1; uint64_t gen = ~0ULL; std::vector<double> xs, good, total; std::vector<int> heard;
+                   uint64_t sumG = 0, sumB = 0; int64_t lastPkt = -1; };
+    static Cache C;
+    uint64_t gen = S.act.size() * 1000003ULL + S.actH.size();
+    if (!S.act.empty()) gen += (uint64_t)S.act.rbegin()->second.good * 7919ULL + S.act.rbegin()->second.bad;
+    if (C.range != S.actRange || C.now != nowMin || C.gen != gen) {
+    C.range = S.actRange; C.now = nowMin; C.gen = gen;
+    std::vector<double> xs(nb), good(nb, 0), total(nb, 0);
+    std::vector<int> heard(nb, 0);   // minutes listened in each bin
+    uint64_t sumG = 0, sumB = 0; int64_t lastPkt = -1, lastPktH = -1;
+    for (int i = 0; i < nb; i++) xs[i] = (double)((lastBinL - (int64_t)(nb - 1 - i) * R.binMin) - localNow + R.binMin * 0.5) / 60.0;   // bin centre, hours from now
+    for (auto it = S.act.lower_bound(firstL - tzMin); it != S.act.end(); ++it) {
+        const int b = (int)((it->first + tzMin - firstL) / R.binMin);
+        if (b < 0 || b >= nb) continue;
+        good[b] += it->second.good; total[b] += it->second.good + it->second.bad; heard[b]++;
+        sumG += it->second.good; sumB += it->second.bad;
+        if (it->second.good) lastPkt = it->first;
+    }
+    for (auto it = S.actH.lower_bound(firstL - tzMin - 60); it != S.actH.end(); ++it) {   // older than a month: hours
+        const int b = (int)((it->first + tzMin - firstL) / R.binMin);
+        if (it->first + tzMin < firstL || b >= nb) continue;
+        good[b] += it->second.good; total[b] += it->second.good + it->second.bad; heard[b] += (int)it->second.listened;
+        sumG += it->second.good; sumB += it->second.bad;
+        if (it->second.good) lastPktH = it->first + 59;   // the hour's last minute (the newest such hour wins)
+    }
+    if (lastPkt < 0) lastPkt = lastPktH;
+    C.xs = std::move(xs); C.good = std::move(good); C.total = std::move(total); C.heard = std::move(heard);
+    C.sumG = sumG; C.sumB = sumB; C.lastPkt = lastPkt;
+    }
+    const std::vector<double>& xs = C.xs; const std::vector<double>& good = C.good; const std::vector<double>& total = C.total;
+    const std::vector<int>& heard = C.heard;
+    const uint64_t sumG = C.sumG, sumB = C.sumB; const int64_t lastPkt = C.lastPkt;
+    double peak = 0;
+    for (int i = 0; i < nb; i++) peak = std::max(peak, good[i]);
+    char line[200];
+    const auto binText = [](int64_t m) { char b[40]; if (m >= 60) snprintf(b, sizeof b, "%g h", m / 60.0); else snprintf(b, sizeof b, "%lld min", (long long)m); return std::string(b); };
+    std::string last = "none";
+    if (lastPkt >= 0) { time_t t = (time_t)(lastPkt * 60); char b[32]; std::strftime(b, sizeof b, R.days ? "%a %H:%M" : "%H:%M", std::localtime(&t)); last = b; }
+    snprintf(line, sizeof line, "%llu packets, %llu CRC errors in the last %s; busiest %s: %.0f; last packet %s", (unsigned long long)sumG,
+             (unsigned long long)sumB, R.label, binText(R.binMin).c_str(), peak, last.c_str());
+    ImGui::TextUnformatted(line);
+    if (!radio2Active(a)) { ImGui::SameLine(0, 10 * gUi); ImGui::TextColored(pal::warnAmber(), "radio2 is off (Settings): nothing is counted"); }
+    // ticks on the local clock
+    std::vector<double> tv; std::vector<std::string> tl; std::vector<const char*> tp;
+    for (int64_t t = lastBinL - (((lastBinL % R.tickMin) + R.tickMin) % R.tickMin); t >= firstL; t -= R.tickMin) {
+        tv.push_back((double)(t - localNow) / 60.0);
+        time_t u = (time_t)((t - tzMin) * 60); char b[32];
+        std::strftime(b, sizeof b, !R.days ? "%H:%M" : R.tickMin >= 20160 ? "%b %d" : R.tickMin >= 1440 ? "%a %d" : "%a %H:%M", std::localtime(&u));
+        tl.push_back(b);
+    }
+    std::reverse(tv.begin(), tv.end()); std::reverse(tl.begin(), tl.end());   // ascending, as the axis wants them
+    for (const auto& x : tl) tp.push_back(x.c_str());
+    const ImVec2 sz(-1, std::max(160.f * gUi, ImGui::GetContentRegionAvail().y - 2 * ImGui::GetTextLineHeightWithSpacing() - 4));
+    if (plt::BeginPlot("##mmact", sz, plt::Flags_NoLegend | plt::Flags_NoPan | plt::Flags_NoMouseText)) {
+        const std::string yl = "packets per " + binText(R.binMin);
+        plt::SetupAxes(nullptr, yl.c_str());
+        const double x0 = (double)(firstL - localNow) / 60.0, x1 = (double)(lastBinL + R.binMin - localNow) / 60.0;
+        plt::SetupAxisLimits(plt::X1, x0, x1, plt::Cond_Always);
+        double ymax = 1;
+        for (double v : total) ymax = std::max(ymax, v);
+        plt::SetupAxisLimits(plt::Y1, 0, ymax * 1.12, plt::Cond_Always);
+        if (!tv.empty()) plt::SetupAxisTicks(plt::X1, tv.data(), (int)tv.size(), tp.data());
+        // not listened (OnAir off or radio2 off): grey, so a quiet mesh and a deaf receiver look different
+        for (int i = 0; i < nb; i++)
+            if (!heard[i]) { plt::Spec g; g.FillColor = ImVec4(0.55f, 0.55f, 0.58f, 0.22f); char id[16]; snprintf(id, sizeof id, "off%d", i);
+                             plt::PlotVBand(id, xs[i] - R.binMin / 120.0, xs[i] + R.binMin / 120.0, g); }
+        const double w = R.binMin / 60.0 * 0.85;
+        plt::Spec bs; bs.FillColor = ImVec4(0.92f, 0.36f, 0.32f, 0.85f); bs.LineColor = bs.FillColor;
+        plt::PlotBars("CRC errors", xs.data(), total.data(), nb, w, bs);   // under the good ones: the red part on top is the errors
+        plt::Spec gs; gs.FillColor = meshRadio2Colour(0.9f); gs.LineColor = gs.FillColor;
+        plt::PlotBars("packets", xs.data(), good.data(), nb, w, gs);
+        plt::EndPlot();
+    }
+    ImGui::PushTextWrapPos(0);
+    ImGui::TextDisabled("Pink: packets radio2 decoded; red on top: CRC errors; grey: OnAir was not listening with radio2 on. Minute detail is kept for a month, hourly totals for a year.");
+    ImGui::PopTextWrapPos();
+}
+
 void tab(App& a) {
     loadState();
     if (const int m = subMask(a)) {   // a protocol entry: only its own views (LoRa APRS: stations instead of nodes and chat; MeshCom: stations and chat; LoRaWAN: devices and frames)
-        static const int aprsIds[] = {5, 1, 3, 4}, comIds[] = {5, 1, 2, 3, 4}, meshIds[] = {0, 1, 2, 3, 8, 4}, lwIds[] = {6, 7, 4};
+        static const int aprsIds[] = {5, 1, 3, 4}, comIds[] = {5, 1, 2, 3, 4}, meshIds[] = {0, 1, 2, 3, 8, 9, 4}, lwIds[] = {6, 7, 4};
         const bool ap = m == 4, com = m == 8, lw = m == 16;
         const int* ids = ap ? aprsIds : com ? comIds : lw ? lwIds : meshIds;
-        const int n = ap ? 4 : lw ? 3 : com ? 5 : 6;
+        const int n = ap ? 4 : lw ? 3 : com ? 5 : 7;
         int k = 0;
         for (int i = 0; i < n; i++) if (ids[i] == S.view) k = i;
         if (ap) subNav("meshva", k, {"Stations", "Map", "Packets", "Settings"});
         else if (com) subNav("meshvc", k, {"Stations", "Map", "Chat", "Packets", "Settings"});
         else if (lw) subNav("meshvl", k, {"Devices", "Frames", "Settings"});
-        else subNav("meshvm", k, {"Nodes", "Map", "Chat", "Packets", "Telemetry", "Settings"});
+        else subNav("meshvm", k, {"Nodes", "Map", "Chat", "Packets", "Telemetry", "MediaMesh", "Settings"});
         S.view = ids[k];
     } else {
         if (S.view == 7) S.view = 3;
-        static const int ids[] = {0, 1, 2, 3, 8, 4, 5, 6};   // the views in the order of the tabs (7, the LoRaWAN frames, has no tab here)
+        static const int ids[] = {0, 1, 2, 3, 8, 9, 4, 5, 6};   // the views in the order of the tabs (7, the LoRaWAN frames, has no tab here)
         int k = 0;
-        for (int i = 0; i < 8; i++) if (ids[i] == S.view) k = i;
-        subNav("meshv", k, {"Nodes", "Map", "Chat", "Packets", "Telemetry", "Settings", "APRS", "LoRaWAN"});
+        for (int i = 0; i < 9; i++) if (ids[i] == S.view) k = i;
+        subNav("meshv", k, {"Nodes", "Map", "Chat", "Packets", "Telemetry", "MediaMesh", "Settings", "APRS", "LoRaWAN"});
         S.view = ids[k];
     }
     plat::prefs().setI("meshView", S.view);
@@ -1525,6 +1791,7 @@ void tab(App& a) {
     if (S.view == 3) { packetTable(a); return; }
     if (S.view == 8) { telemetryTable(a); return; }
     if (S.view == 4) { settingsView(a); return; }
+    if (S.view == 9) { mediaMeshView(a); return; }
     if (S.view == 5) { aprsTable(a); return; }
     if (S.view == 6) { lorawanDevices(a, false); return; }
     if (S.view == 7) { lorawanFrames(a); return; }
@@ -1575,7 +1842,9 @@ void receiver(App& a) {
         for (const auto& d : t.decoders) {
             if (!d.inBand && d.protocol >= 3) continue;    // the 70 cm list is long: only the channels in the capture
             ImGui::TableNextRow();
-            ImGui::TableNextColumn(); ImGui::TextColored(protoColour(d.protocol), "%s", ellipsize(d.preset, ImGui::GetContentRegionAvail().x).c_str());
+            const bool r2 = meshIsRadio2(d.preset);
+            if (r2) ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, ImGui::GetColorU32(meshRadio2Colour(0.16f)));
+            ImGui::TableNextColumn(); ImGui::TextColored(r2 ? meshRadio2Colour() : protoColour(d.protocol), "%s", ellipsize(d.preset, ImGui::GetContentRegionAvail().x).c_str());
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", d.preset.c_str());
             ImGui::TableNextColumn(); ImGui::Text("%.3f", d.freqHz / 1e6);
             ImGui::TableNextColumn(); ImGui::Text("%d", d.sf);
@@ -1621,9 +1890,12 @@ void panels(App& a) {
         if (on) {
             for (size_t i = t.packets.size(); i-- > 0;) {
                 const dect2::MeshPacket& p = t.packets[i];
+                const bool r2 = meshIsRadio2(p.preset);
                 ImGui::TableNextRow();
+                if (r2) ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, ImGui::GetColorU32(meshRadio2Colour(0.16f)));   // heard on radio2's channel
                 ImGui::TableNextColumn(); ImGui::TextUnformatted(clock(p.timeSec).c_str());
-                ImGui::TableNextColumn(); ImGui::TextColored(protoColour(p.protocol), "%s", protoTag(p.protocol));
+                ImGui::TableNextColumn(); ImGui::TextColored(r2 ? meshRadio2Colour() : protoColour(p.protocol), "%s", protoTag(p.protocol));
+                if (r2 && ImGui::IsItemHovered()) ImGui::SetTooltip("radio2 (%.3f MHz)", p.freqHz / 1e6);
                 ImGui::TableNextColumn(); ImGui::TextUnformatted(ellipsize(p.crcOk ? (p.type.empty() ? "?" : p.type) : "CRC error", ImGui::GetContentRegionAvail().x).c_str());   // the stretched column of a narrow table
                 ImGui::TableNextColumn(); ImGui::TextUnformatted(p.from.c_str());
                 ImGui::TableNextColumn(); ImGui::Text("%.1f", p.snrDb);
