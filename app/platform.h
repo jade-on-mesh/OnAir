@@ -58,6 +58,9 @@ int locateState(double& lat, double& lon, double& accuracyM, std::string& msg);
 std::vector<std::string> uiFontCandidates();
 std::vector<std::string> cjkFontCandidates();   // system CJK font merged into the UI fonts for Chinese/Japanese/Korean service names
 std::vector<std::string> monoFontCandidates();
+// emoji merged into the UI fonts after the CJK ones (mesh node names): fonts with outlines, drawn in the text colour. Colour-bitmap emoji fonts
+// (Noto Color Emoji, Apple Color Emoji) have none, so they are not listed. Emoji fonts also map the joiners (U+FE0F, U+200D) to nothing.
+std::vector<std::string> emojiFontCandidates();
 
 // The language the user reads the system in, as a code such as "de", "zh-Hans" or "lt_LT.UTF-8" (i18n::set() takes the first letters)
 std::string uiLanguage();

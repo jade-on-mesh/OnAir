@@ -338,6 +338,12 @@ std::vector<std::string> cjkFontCandidates() {
             "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc", "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
             "/usr/share/fonts/wenquanyi/wqy-microhei/wqy-microhei.ttc"};
 }
+std::vector<std::string> emojiFontCandidates() {
+    return {"C:/Windows/Fonts/seguiemj.ttf", "C:/Windows/Fonts/seguisym.ttf",   // Segoe UI Emoji (outlines under its colour layers), Segoe UI Symbol
+            "/usr/share/fonts/truetype/noto/NotoEmoji-Regular.ttf", "/usr/share/fonts/noto/NotoEmoji-Regular.ttf",
+            "/usr/share/fonts/google-noto-emoji/NotoEmoji-Regular.ttf", "/usr/share/fonts/truetype/ancient-scripts/Symbola_hint.ttf",
+            "/usr/share/fonts/TTF/Symbola.ttf", "/usr/share/fonts/gdouros-symbola/Symbola.ttf"};
+}
 std::vector<std::string> monoFontCandidates() {
     return {"C:/Windows/Fonts/consola.ttf", "C:/Windows/Fonts/lucon.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
             "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf", "/usr/share/fonts/TTF/DejaVuSansMono.ttf", "/usr/share/fonts/dejavu/DejaVuSansMono.ttf",

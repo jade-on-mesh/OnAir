@@ -211,6 +211,7 @@ std::vector<std::string> cjkFontCandidates() { return {"/System/Library/Fonts/Ap
                                                           "/System/Library/Fonts/STHeiti Medium.ttc", "/System/Library/Fonts/Hiragino Sans GB.ttc",
                                                           "/System/Library/Fonts/\xE3\x83\x92\xE3\x83\xA9\xE3\x82\xAE\xE3\x83\x8E\xE8\xA7\x92\xE3\x82\xB4\xE3\x82\xB7\xE3\x83\x83\xE3\x82\xAF W3.ttc"}; }
 std::vector<std::string> monoFontCandidates() { return {"/System/Library/Fonts/Menlo.ttc"}; }
+std::vector<std::string> emojiFontCandidates() { return {"/System/Library/Fonts/Apple Symbols.ttf"}; }   // Apple Color Emoji has bitmaps only
 std::string uiLanguage() {
     NSArray<NSString*>* l = [NSLocale preferredLanguages];   // the order of System Settings > Language & Region
     return l.count ? std::string([l[0] UTF8String]) : std::string("en");

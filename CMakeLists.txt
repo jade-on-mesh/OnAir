@@ -303,6 +303,7 @@ if(DECT2_BUILD_APP)
   endif()
   add_library(imgui STATIC ${IMGUI_SOURCES})
   target_include_directories(imgui PUBLIC third_party/imgui third_party/imgui/backends)
+  target_compile_definitions(imgui PUBLIC IMGUI_USE_WCHAR32)   # characters above U+FFFF (emoji in mesh node names) reach the fonts
   if(DECT2_UI_LAYOUT_CHECK)
     target_compile_definitions(imgui PUBLIC IMGUI_ENABLE_TEST_ENGINE DECT2_UI_LAYOUT_CHECK)
   endif()

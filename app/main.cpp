@@ -543,7 +543,10 @@ int main(int argc, char** argv) {
     for (const auto& f : plat::monoFontCandidates()) if (access(f.c_str(), R_OK) == 0 && (app.mono = io.Fonts->AddFontFromFileTTF(f.c_str(), 13.0f))) break;
     if (!ui) ui = io.Fonts->AddFontDefault();
     // CJK (Korean/Japanese/Chinese): merge every system font that loads (Menlo has no Hangul; DRM Journaline needs it).
-    for (const auto& f : plat::cjkFontCandidates()) {
+    // then emoji (mesh node names), after the CJK fonts so that the letters, digits and symbols those have stay theirs
+    std::vector<std::string> extraFonts = plat::cjkFontCandidates();
+    for (const auto& f : plat::emojiFontCandidates()) extraFonts.push_back(f);
+    for (const auto& f : extraFonts) {
         if (access(f.c_str(), R_OK) != 0) continue;
         ImFontConfig mc;
         mc.MergeMode = true;
